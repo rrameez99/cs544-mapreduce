@@ -1,0 +1,200 @@
+syntax = "proto3";
+
+package mapreduce;
+
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
+
+// Runs in the boss container. Called by the client (jobs) and by workers
+// (registration, heartbeats, task reports).
+service Boss {
+  // Client -> Boss
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  rpc GetJobStatus(GetJobStatusRequest) returns (JobStatus);
+
+  // Worker -> Boss
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Pull model: a worker sends a heartbeat every second. The response may
+  // carry a task assignment. A missing heartbeat means the worker is dead.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ReportTaskDone(TaskDoneReport) returns (ReportAck);
+  rpc ReportTaskFailed(TaskFailedReport) returns (ReportAck);
+}
+
+// Runs in every worker container. Called by reducers on other workers to
+// fetch map output from this worker's local disk.
+service Worker {
+  // Streams one partition file. Returns NOT_FOUND if this worker does not
+  // have the requested map attempt's output.
+  rpc FetchPartition(FetchPartitionRequest) returns (stream PartitionChunk);
+}
+
+// ---------------------------------------------------------------------------
+// Jobs (client <-> boss)
+// ---------------------------------------------------------------------------
+
+message JobSpec {
+  string input_path = 1;     // file or directory under /shared
+  string output_path = 2;    // directory under /shared; must not exist yet
+  string job_file_name = 3;  // e.g. "wordcount.py", used in error messages
+  bytes job_code = 4;        // contents of the user's .py file
+  int32 num_map_tasks = 5;
+  int32 num_reduce_tasks = 6;
+  bool use_combiner = 7;     // if true, the job file must define combine()
+}
+
+message SubmitJobRequest {
+  JobSpec spec = 1;
+}
+
+message SubmitJobResponse {
+  string job_id = 1;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_MAPPING = 1;
+  JOB_STATE_REDUCING = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_FAILED = 4;
+}
+
+message JobStatus {
+  string job_id = 1;
+  JobState state = 2;
+  int32 map_tasks_done = 3;
+  int32 num_map_tasks = 4;
+  int32 reduce_tasks_done = 5;
+  int32 num_reduce_tasks = 6;
+  string failure_reason = 7;  // set only when state is JOB_STATE_FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Worker registration and heartbeats (worker -> boss)
+// ---------------------------------------------------------------------------
+
+message RegisterRequest {
+  string worker_id = 1;      // container hostname, e.g. "worker-1"
+  string fetch_address = 2;  // host:port of this worker's Worker service
+}
+
+message RegisterResponse {}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  bool ready_for_task = 2;  // false while the worker is running a task
+}
+
+message HeartbeatResponse {
+  // At most one is set. Neither set means "no work for you right now".
+  oneof assignment {
+    MapTask map_task = 1;
+    ReduceTask reduce_task = 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (boss -> worker, inside HeartbeatResponse)
+// ---------------------------------------------------------------------------
+
+enum TaskKind {
+  TASK_KIND_UNSPECIFIED = 0;
+  TASK_KIND_MAP = 1;
+  TASK_KIND_REDUCE = 2;
+}
+
+// Identifies one attempt of one task. A task can have several attempts:
+// re-execution after a timeout or failure, or a backup task. Every report
+// and every output file name carries the attempt.
+message TaskAttempt {
+  string job_id = 1;
+  TaskKind kind = 2;
+  int32 task_id = 3;     // index in [0, num_map_tasks) or [0, num_reduce_tasks)
+  int32 attempt_id = 4;  // unique within a task, increasing from 0
+}
+
+// Byte range [start_offset, end_offset) of one input file. A map task
+// processes every line whose first byte falls inside this range, so a line
+// that crosses end_offset is read whole by this split, and a line that
+// crosses start_offset belongs to the previous split.
+message InputSplit {
+  string path = 1;
+  int64 start_offset = 2;
+  int64 end_offset = 3;
+}
+
+message MapTask {
+  TaskAttempt attempt = 1;
+  repeated InputSplit splits = 2;  // usually one; more if the range spans files
+  int32 num_reduce_tasks = 3;
+  bytes job_code = 4;
+  bool use_combiner = 5;
+}
+
+// Where the accepted output of one map task lives.
+message MapOutputLocation {
+  int32 map_task_id = 1;
+  int32 attempt_id = 2;      // the attempt the boss accepted
+  string fetch_address = 3;  // Worker service holding the partition files
+}
+
+message ReduceTask {
+  TaskAttempt attempt = 1;
+  repeated MapOutputLocation map_outputs = 2;  // exactly one per map task
+  string output_path = 3;
+  bytes job_code = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Task reports (worker -> boss)
+// ---------------------------------------------------------------------------
+
+message TaskMetrics {
+  int64 records_in = 1;
+  int64 records_out = 2;
+  int64 bytes_written = 3;  // intermediate files (map) or final output (reduce)
+  int64 bytes_fetched = 4;  // reduce only
+  double run_seconds = 5;   // measured on the worker
+}
+
+message TaskDoneReport {
+  string worker_id = 1;
+  TaskAttempt attempt = 2;
+  TaskMetrics metrics = 3;
+}
+
+message TaskFailedReport {
+  string worker_id = 1;
+  TaskAttempt attempt = 2;
+  string error = 3;  // human-readable, e.g. the traceback from user code
+  // Set by a reducer that could not fetch a map task's output (the worker
+  // holding it is down or lost the files). The boss re-runs that map task.
+  optional int32 unfetchable_map_task_id = 4;
+}
+
+message ReportAck {
+  // False when the boss ignored the report: a duplicate of an attempt it
+  // already accepted, or an attempt it no longer tracks.
+  bool accepted = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Shuffle (reducer's worker -> mapper's worker)
+// ---------------------------------------------------------------------------
+
+message FetchPartitionRequest {
+  string job_id = 1;
+  int32 map_task_id = 2;
+  int32 attempt_id = 3;
+  int32 reduce_task_id = 4;
+}
+
+// A partition file is streamed in chunks of at most 1 MiB.
+message PartitionChunk {
+  bytes data = 1;
+}
