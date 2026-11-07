@@ -1,0 +1,52 @@
+# One boss and four workers, all from the same image. Each worker is limited
+# to 1 CPU, so a job only gets faster when its tasks are spread across all
+# four workers (the VM has 4 CPUs).
+
+x-worker: &worker
+  build: .
+  image: cs544-mapreduce
+  command: python -m worker.server
+  cpus: 1
+  depends_on:
+    - boss
+  volumes:
+    - ./shared:/shared
+  environment: &worker-env
+    BOSS_ADDRESS: boss:5440
+    WORKER_PORT: "5441"
+
+services:
+  boss:
+    build: .
+    image: cs544-mapreduce
+    command: python -m boss.server
+    ports:
+      - "5440:5440"  # the client on the host submits jobs here
+    volumes:
+      - ./shared:/shared
+    environment:
+      BOSS_PORT: "5440"
+
+  worker-1:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: worker-1
+
+  worker-2:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: worker-2
+
+  worker-3:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: worker-3
+
+  worker-4:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: worker-4

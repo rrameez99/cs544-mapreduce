@@ -1,0 +1,4 @@
+# Shared storage mounted at /shared in every container. Job input and
+# output live here; keep the folder in Git but none of its contents.
+*
+!.gitignore

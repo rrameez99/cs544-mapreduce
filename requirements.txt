@@ -1,0 +1,3 @@
+# Runtime dependencies for the boss, workers, and client.
+# grpcio-tools pulls in grpcio and protobuf, and generates code from the .proto.
+grpcio-tools==1.85.1
