@@ -6,6 +6,7 @@ x-worker: &worker
   build: .
   image: cs544-mapreduce
   command: python -m worker.server
+  init: true  # see the boss service
   cpus: 1
   depends_on:
     - boss
@@ -20,6 +21,9 @@ services:
     build: .
     image: cs544-mapreduce
     command: python -m boss.server
+    # Run a tiny init process as PID 1. Python as PID 1 ignores SIGTERM, so
+    # without this `docker compose down/stop` waits 10s and then force-kills.
+    init: true
     ports:
       - "5440:5440"  # the client on the host submits jobs here
     volumes:
