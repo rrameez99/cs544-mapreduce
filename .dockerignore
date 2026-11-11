@@ -1,0 +1,9 @@
+.git
+.github
+.venv
+shared
+**/__pycache__
+# Generated inside the image by scripts/gen_protos.py
+protos/*_pb2.py
+protos/*_pb2.pyi
+protos/*_pb2_grpc.py
