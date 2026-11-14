@@ -37,6 +37,11 @@ def test_registering_again_reports_it_was_already_registered(registry):
     assert registry.live_worker_ids() == ["worker-1"]
 
 
+def test_heartbeat_returns_the_workers_fetch_address(registry):
+    registry.register("worker-1", "worker-1:5441")
+    assert registry.record_heartbeat("worker-1") == "worker-1:5441"
+
+
 def test_heartbeat_from_unregistered_worker_raises(registry):
     with pytest.raises(UnknownWorkerError):
         registry.record_heartbeat("worker-9")

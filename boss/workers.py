@@ -44,11 +44,14 @@ class WorkerRegistry:
             self._workers[worker_id] = WorkerRecord(worker_id, fetch_address, self._clock())
             return was_registered
 
-    def record_heartbeat(self, worker_id: str) -> None:
+    def record_heartbeat(self, worker_id: str) -> str:
+        """Note that the worker is alive, and return its fetch address."""
         with self._lock:
             if worker_id not in self._workers:
                 raise UnknownWorkerError(worker_id)
-            self._workers[worker_id].last_heartbeat_time = self._clock()
+            record = self._workers[worker_id]
+            record.last_heartbeat_time = self._clock()
+            return record.fetch_address
 
     def remove_dead_workers(self) -> list[str]:
         """Remove every worker whose last heartbeat is older than the timeout, and return their IDs."""
