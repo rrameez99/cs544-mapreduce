@@ -15,6 +15,7 @@ from concurrent import futures
 
 import grpc
 
+from boss.events import JsonlEventLog
 from boss.jobs import InvalidJobError, InvalidReportError, Scheduler, UnknownJobError, list_input_files
 from boss.workers import UnknownWorkerError, WorkerRegistry
 from common.env import require_int_env
@@ -119,7 +120,7 @@ class BossServicer(pb_grpc.BossServicer):
 
     def ReportTaskDone(self, request, context):
         try:
-            accepted = self._scheduler.report_task_done(request.worker_id, request.attempt)
+            accepted = self._scheduler.report_task_done(request.worker_id, request.attempt, request.metrics)
         except UnknownJobError:
             context.abort(grpc.StatusCode.NOT_FOUND, f"no job with ID {request.attempt.job_id!r}")
         except InvalidReportError as error:
@@ -186,7 +187,7 @@ def main() -> None:
     port = require_int_env("BOSS_PORT")
 
     registry = WorkerRegistry(HEARTBEAT_TIMEOUT_SECONDS, clock=time.monotonic)
-    scheduler = Scheduler(TASK_TIMEOUT_SECONDS, clock=time.monotonic)
+    scheduler = Scheduler(TASK_TIMEOUT_SECONDS, clock=time.monotonic, events=JsonlEventLog())
     server, _ = build_server(registry, scheduler, SHARED_ROOT, f"0.0.0.0:{port}")
     server.start()
     log.info("boss listening on port %d (task timeout %.0fs)", port, TASK_TIMEOUT_SECONDS)

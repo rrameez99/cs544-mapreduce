@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
+from boss.events import EventLog
 from protos import mapreduce_pb2 as pb
 
 # A task whose attempts keep failing (e.g. the user's map() raises) fails the job.
@@ -75,9 +76,12 @@ class Task:
         return TaskState.IDLE
 
     @property
+    def kind_name(self) -> str:
+        return "map" if self.kind == pb.TASK_KIND_MAP else "reduce"
+
+    @property
     def name(self) -> str:
-        kind_name = "map" if self.kind == pb.TASK_KIND_MAP else "reduce"
-        return f"{kind_name} task {self.task_id}"
+        return f"{self.kind_name} task {self.task_id}"
 
 
 @dataclass
@@ -87,6 +91,7 @@ class Job:
     map_splits: list[list[pb.InputSplit]]
     map_tasks: list[Task]
     reduce_tasks: list[Task]
+    submit_time: float
     failure_reason: str = ""  # non-empty once the job has failed
     duplicate_reports: int = 0  # completions ignored because the task was already done
 
@@ -157,11 +162,14 @@ class Scheduler:
     """All job and task state. Every public method is thread-safe.
 
     `clock` returns the current time in seconds; tests pass a fake clock.
+    Everything that happens to a job is also recorded in `events` (see
+    boss/events.py), which the evaluation plots are built from.
     """
 
-    def __init__(self, task_timeout_seconds: float, clock: Callable[[], float]):
+    def __init__(self, task_timeout_seconds: float, clock: Callable[[], float], events: EventLog):
         self._task_timeout_seconds = task_timeout_seconds
         self._clock = clock
+        self._events = events
         self._lock = threading.Lock()
         self._jobs: dict[str, Job] = {}  # insertion order = submission order, so jobs run FIFO
         self._job_numbers = itertools.count(1)
@@ -176,16 +184,27 @@ class Scheduler:
         if not spec.job_code:
             raise InvalidJobError("job_code is empty")
 
+        total_bytes = sum(size for _, size in input_files)
         with self._lock:
             job_id = f"job-{next(self._job_numbers)}"
-            self._jobs[job_id] = Job(
+            job = Job(
                 job_id=job_id,
                 spec=spec,
                 map_splits=compute_splits(input_files, spec.num_map_tasks),
                 map_tasks=[Task(pb.TASK_KIND_MAP, i) for i in range(spec.num_map_tasks)],
                 reduce_tasks=[Task(pb.TASK_KIND_REDUCE, r) for r in range(spec.num_reduce_tasks)],
+                submit_time=self._clock(),
             )
-        total_bytes = sum(size for _, size in input_files)
+            self._jobs[job_id] = job
+            self._record(
+                job,
+                "job_submitted",
+                num_map_tasks=spec.num_map_tasks,
+                num_reduce_tasks=spec.num_reduce_tasks,
+                use_combiner=spec.use_combiner,
+                input_files=len(input_files),
+                input_bytes=total_bytes,
+            )
         log.info(
             "%s submitted: %d input files (%d bytes), %d map tasks, %d reduce tasks",
             job_id, len(input_files), total_bytes, spec.num_map_tasks, spec.num_reduce_tasks,
@@ -227,19 +246,38 @@ class Scheduler:
                     return self._start_attempt(job, task, worker_id, fetch_address, now)
             return None
 
-    def report_task_done(self, worker_id: str, attempt: pb.TaskAttempt) -> bool:
+    def report_task_done(self, worker_id: str, attempt: pb.TaskAttempt, metrics: pb.TaskMetrics) -> bool:
         """Record a finished attempt. Returns False if the report was ignored (duplicate or stale)."""
         now = self._clock()
         with self._lock:
             job, task = self._find_task(attempt)
+
+            def record_finish(outcome: str) -> None:
+                self._record(
+                    job,
+                    "attempt_finished",
+                    **self._attempt_fields(task, attempt.attempt_id, worker_id),
+                    outcome=outcome,
+                    run_seconds=round(metrics.run_seconds, 3),
+                    records_in=metrics.records_in,
+                    records_out=metrics.records_out,
+                    bytes_written=metrics.bytes_written,
+                    bytes_fetched=metrics.bytes_fetched,
+                )
+
             if job.is_finished:
+                record_finish("after job finished")
                 return False
             if task.state == TaskState.DONE:
                 job.duplicate_reports += 1
+                finished_backup = self._running_attempt(task, attempt.attempt_id, worker_id)
+                if finished_backup is not None:
+                    del task.running_attempts[finished_backup.attempt_id]  # it's over, even though it lost
                 log.info(
                     "%s: ignoring attempt %d of %s; attempt %d was already accepted",
                     job.job_id, attempt.attempt_id, task.name, task.accepted_attempt.attempt_id,
                 )
+                record_finish("duplicate")
                 return False
             running = self._running_attempt(task, attempt.attempt_id, worker_id)
             if running is None:
@@ -247,17 +285,21 @@ class Scheduler:
                     "%s: ignoring completion of unknown attempt %d of %s from %s",
                     job.job_id, attempt.attempt_id, task.name, worker_id,
                 )
+                record_finish("stale")
                 return False
 
             state_before = job.state
             del task.running_attempts[running.attempt_id]
             task.accepted_attempt = running
+            record_finish("accepted")
             log.info(
                 "%s: %s done (attempt %d on %s, %.1fs)",
                 job.job_id, task.name, running.attempt_id, worker_id, now - running.start_time,
             )
             if job.state != state_before:
                 log.info("%s is now %s", job.job_id, pb.JobState.Name(job.state))
+            if job.state == pb.JOB_STATE_SUCCEEDED:
+                self._record(job, "job_finished", state="SUCCEEDED", failure_reason="")
             return True
 
     def report_task_failed(
@@ -276,7 +318,19 @@ class Scheduler:
         """
         with self._lock:
             job, task = self._find_task(attempt)
+
+            def record_failure(outcome: str) -> None:
+                self._record(
+                    job,
+                    "attempt_failed",
+                    **self._attempt_fields(task, attempt.attempt_id, worker_id),
+                    outcome=outcome,
+                    error=error,
+                    unfetchable_map_task_id=unfetchable_map_task_id,
+                )
+
             if job.is_finished:
+                record_failure("after job finished")
                 return False
             running = self._running_attempt(task, attempt.attempt_id, worker_id)
             if running is None:
@@ -284,10 +338,12 @@ class Scheduler:
                     "%s: ignoring failure of unknown attempt %d of %s from %s",
                     job.job_id, attempt.attempt_id, task.name, worker_id,
                 )
+                record_failure("stale")
                 return False
             del task.running_attempts[running.attempt_id]
 
             if unfetchable_map_task_id is not None:
+                record_failure("map output unfetchable")
                 self._handle_unfetchable_map_output(job, task, running, unfetchable_map_task_id)
                 return True
             if task.state == TaskState.DONE:
@@ -296,8 +352,10 @@ class Scheduler:
                     "%s: attempt %d of %s failed after the task was already done: %s",
                     job.job_id, running.attempt_id, task.name, error,
                 )
+                record_failure("after task done")
                 return True
 
+            record_failure("counted")
             task.failure_count += 1
             log.warning(
                 "%s: attempt %d of %s failed on %s (failure %d of %d): %s",
@@ -309,6 +367,7 @@ class Scheduler:
                     f"{task.name} failed {task.failure_count} times; last error: {error}"
                 )
                 log.error("%s failed: %s", job.job_id, job.failure_reason)
+                self._record(job, "job_finished", state="FAILED", failure_reason=job.failure_reason)
             return True
 
     def handle_dead_worker(self, worker_id: str) -> None:
@@ -333,10 +392,18 @@ class Scheduler:
                     for attempt_id in lost_attempt_ids:
                         del task.running_attempts[attempt_id]
                         log.info("%s: attempt %d of %s lost with %s", job.job_id, attempt_id, task.name, worker_id)
+                        self._record(job, "attempt_lost", **self._attempt_fields(task, attempt_id, worker_id))
                 for task in job.map_tasks:
                     if task.accepted_attempt is not None and task.accepted_attempt.worker_id == worker_id:
+                        lost_attempt_id = task.accepted_attempt.attempt_id
                         task.accepted_attempt = None
                         log.info("%s: re-running %s; its output was on %s", job.job_id, task.name, worker_id)
+                        self._record(
+                            job,
+                            "map_output_lost",
+                            **self._attempt_fields(task, lost_attempt_id, worker_id),
+                            reason="worker died",
+                        )
 
     def duplicate_reports(self, job_id: str) -> int:
         with self._lock:
@@ -360,6 +427,20 @@ class Scheduler:
         if not 0 <= attempt.task_id < len(tasks):
             raise InvalidReportError(f"{attempt.job_id} has no task {attempt.task_id} of kind {attempt.kind}")
         return job, tasks[attempt.task_id]
+
+    def _record(self, job: Job, event_name: str, **fields) -> None:
+        """Add one event to the job's event log, timestamped relative to submission."""
+        event = {
+            "event": event_name,
+            "job_id": job.job_id,
+            "t": round(self._clock() - job.submit_time, 3),
+            **fields,
+        }
+        self._events.record(job.spec.output_path, event)
+
+    @staticmethod
+    def _attempt_fields(task: Task, attempt_id: int, worker_id: str) -> dict:
+        return {"kind": task.kind_name, "task_id": task.task_id, "attempt_id": attempt_id, "worker_id": worker_id}
 
     @staticmethod
     def _running_attempt(task: Task, attempt_id: int, worker_id: str) -> Attempt | None:
@@ -400,6 +481,13 @@ class Scheduler:
             job.job_id, attempt_id, task.name, worker_id,
             " (earlier attempt timed out)" if is_retry else "",
         )
+        if is_retry:
+            reason = "timeout"
+        elif attempt_id == 0:
+            reason = "first"
+        else:
+            reason = "rerun"  # after a failure, a lost worker, or lost map output
+        self._record(job, "attempt_started", **self._attempt_fields(task, attempt_id, worker_id), reason=reason)
 
         attempt = pb.TaskAttempt(job_id=job.job_id, kind=task.kind, task_id=task.task_id, attempt_id=attempt_id)
         if task.kind == pb.TASK_KIND_MAP:
@@ -439,6 +527,12 @@ class Scheduler:
             log.warning(
                 "%s: %s could not fetch %s output from %s; re-running %s",
                 job.job_id, reduce_task.name, map_task.name, accepted.worker_id, map_task.name,
+            )
+            self._record(
+                job,
+                "map_output_lost",
+                **self._attempt_fields(map_task, accepted.attempt_id, accepted.worker_id),
+                reason="unfetchable",
             )
         else:
             log.info(
