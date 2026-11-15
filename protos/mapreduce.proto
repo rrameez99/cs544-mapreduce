@@ -42,6 +42,9 @@ message JobSpec {
   int32 num_map_tasks = 5;
   int32 num_reduce_tasks = 6;
   bool use_combiner = 7;     // if true, the job file must define combine()
+  // If true, the boss launches backup attempts of the last running tasks
+  // of each phase, and the first attempt to finish wins (paper §3.6).
+  bool use_backup_tasks = 8;
 }
 
 message SubmitJobRequest {
