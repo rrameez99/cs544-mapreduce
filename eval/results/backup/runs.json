@@ -1,0 +1,83 @@
+[
+  {
+    "experiment": "backup",
+    "label": "normal",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "normal-run1.jsonl",
+    "job_seconds": 60.261,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "normal",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "normal-run2.jsonl",
+    "job_seconds": 60.705,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "normal",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "normal-run3.jsonl",
+    "job_seconds": 60.211,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "straggler-run1.jsonl",
+    "job_seconds": 100.185,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "straggler-run2.jsonl",
+    "job_seconds": 95.594,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "straggler-run3.jsonl",
+    "job_seconds": 100.286,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler + backups",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "straggler---backups-run1.jsonl",
+    "job_seconds": 96.451,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler + backups",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "straggler---backups-run2.jsonl",
+    "job_seconds": 89.4,
+    "notes": {}
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler + backups",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "straggler---backups-run3.jsonl",
+    "job_seconds": 96.516,
+    "notes": {}
+  }
+]

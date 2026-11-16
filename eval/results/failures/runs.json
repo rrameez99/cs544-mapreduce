@@ -1,0 +1,101 @@
+[
+  {
+    "experiment": "failures",
+    "label": "no failure",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "no-failure-run1.jsonl",
+    "job_seconds": 60.624,
+    "notes": {}
+  },
+  {
+    "experiment": "failures",
+    "label": "no failure",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "no-failure-run2.jsonl",
+    "job_seconds": 60.425,
+    "notes": {}
+  },
+  {
+    "experiment": "failures",
+    "label": "no failure",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "no-failure-run3.jsonl",
+    "job_seconds": 60.198,
+    "notes": {}
+  },
+  {
+    "experiment": "failures",
+    "label": "killed during map",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "killed-during-map-run1.jsonl",
+    "job_seconds": 91.274,
+    "notes": {
+      "killed_worker": "worker-2",
+      "kill_t": 9.696
+    }
+  },
+  {
+    "experiment": "failures",
+    "label": "killed during map",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "killed-during-map-run2.jsonl",
+    "job_seconds": 91.509,
+    "notes": {
+      "killed_worker": "worker-2",
+      "kill_t": 9.49
+    }
+  },
+  {
+    "experiment": "failures",
+    "label": "killed during map",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "killed-during-map-run3.jsonl",
+    "job_seconds": 90.629,
+    "notes": {
+      "killed_worker": "worker-2",
+      "kill_t": 9.491
+    }
+  },
+  {
+    "experiment": "failures",
+    "label": "killed during reduce",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "killed-during-reduce-run1.jsonl",
+    "job_seconds": 91.412,
+    "notes": {
+      "killed_worker": "worker-2",
+      "kill_t": 36.358
+    }
+  },
+  {
+    "experiment": "failures",
+    "label": "killed during reduce",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "killed-during-reduce-run2.jsonl",
+    "job_seconds": 91.27,
+    "notes": {
+      "killed_worker": "worker-2",
+      "kill_t": 36.356
+    }
+  },
+  {
+    "experiment": "failures",
+    "label": "killed during reduce",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "killed-during-reduce-run3.jsonl",
+    "job_seconds": 93.901,
+    "notes": {
+      "killed_worker": "worker-2",
+      "kill_t": 36.565
+    }
+  }
+]
