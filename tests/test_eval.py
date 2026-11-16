@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from eval import analysis, backup, failures, harness, scaling
+from eval import analysis, backup, combiner, failures, harness, scaling
 from eval.analysis import AttemptInterval, EventLogError
 from protos import mapreduce_pb2 as pb
 
@@ -67,6 +67,15 @@ def test_job_seconds_rejects_a_failed_or_unfinished_job():
         analysis.job_seconds([SUBMITTED, job_finished(2.0, state="FAILED", reason="map task 0 failed 3 times")])
     with pytest.raises(EventLogError, match="no job_finished"):
         analysis.job_seconds([SUBMITTED])
+
+
+def test_map_output_bytes_counts_only_accepted_map_attempts():
+    events = [
+        {"event": "attempt_finished", "kind": "map", "outcome": "accepted", "bytes_written": 50},
+        {"event": "attempt_finished", "kind": "map", "outcome": "duplicate", "bytes_written": 500},
+        {"event": "attempt_finished", "kind": "reduce", "outcome": "accepted", "bytes_written": 900},
+    ]
+    assert analysis.map_output_bytes(events) == 50
 
 
 def test_attempt_intervals_pair_each_start_with_how_it_ended():
@@ -253,6 +262,15 @@ def scaled(events, factor):
     return [{**e, "t": e["t"] * factor} for e in events]
 
 
+def with_map_bytes(events, bytes_written):
+    return [
+        {**event, "bytes_written": bytes_written}
+        if event["event"] == "attempt_finished" and event["kind"] == "map" and event["outcome"] == "accepted"
+        else event
+        for event in events
+    ]
+
+
 def test_scaling_plot_renders(tmp_path):
     save_fake_results(tmp_path / "results", "scaling", [
         (scaling.label_for(n), run, scaled(FAILURE_AND_BACKUP_LOG, 4 / n + run * 0.1), {})
@@ -279,3 +297,24 @@ def test_backup_plot_renders(tmp_path):
         (backup.STRAGGLER_WITH_BACKUPS, 1, scaled(FAILURE_AND_BACKUP_LOG, 1.3), {}),
     ])
     assert backup.plot(tmp_path / "results", tmp_path / "plots").stat().st_size > 10_000
+
+
+def test_combiner_plot_renders(tmp_path):
+    save_fake_results(tmp_path / "results", "combiner", [
+        (
+            combiner.WITHOUT_COMBINER,
+            run,
+            scaled(with_map_bytes(FAILURE_AND_BACKUP_LOG, 18_666_667), 1.0 + run / 10),
+            {},
+        )
+        for run in (1, 2, 3)
+    ] + [
+        (
+            combiner.WITH_COMBINER,
+            run,
+            scaled(with_map_bytes(FAILURE_AND_BACKUP_LOG, 200_000), 0.8 + run / 10),
+            {},
+        )
+        for run in (1, 2, 3)
+    ])
+    assert combiner.plot(tmp_path / "results", tmp_path / "plots").stat().st_size > 10_000
