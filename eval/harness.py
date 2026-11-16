@@ -7,11 +7,11 @@ eval/results/<experiment>/, so the plots can be redrawn later from the repo
 alone, without rerunning anything.
 """
 
-import collections
 import functools
 import json
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -23,6 +23,7 @@ from boss.events import EVENT_LOG_FILE_NAME
 from eval.analysis import job_seconds, load_event_file
 from protos import mapreduce_pb2 as pb
 from protos import mapreduce_pb2_grpc as pb_grpc
+from worker.job_code import load_job_functions
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED_ROOT = REPO_ROOT / "shared"  # mounted at /shared in every container
@@ -108,9 +109,23 @@ def wait_for_live_workers(num_workers: int) -> None:
 
 # ----- running one job -----
 
-# Called on every status poll with (latest status, seconds since submission).
-# Experiments use it to kill a worker at the right moment; it returns notes to keep.
-DuringJob = Callable[[pb.JobStatus, float], dict]
+# Called on every status poll with (latest status, the job's events so far,
+# seconds since submission). Experiments use it to kill a worker at the right
+# moment; it returns notes to keep with the run.
+DuringJob = Callable[[pb.JobStatus, list[dict], float], dict]
+
+
+def read_live_events(path: Path) -> list[dict]:
+    """The events the boss has written so far to a running job's log.
+
+    The boss may be in the middle of appending a line, so a last line without
+    its newline is left for the next read.
+    """
+    if not path.is_file():
+        return []  # the boss creates the log with the job's first event
+    data = path.read_bytes()
+    complete = data[: data.rfind(b"\n") + 1]
+    return [json.loads(line) for line in complete.splitlines()]
 
 
 def run_job(
@@ -159,12 +174,13 @@ def run_job(
             if elapsed > JOB_TIMEOUT_SECONDS:
                 raise ExperimentError(f"{experiment} {label} run {run}: {job_id} still running after {elapsed:.0f}s")
             if during_job is not None:
-                notes.update(during_job(status, elapsed))
+                events = read_live_events(SHARED_ROOT / output_name / EVENT_LOG_FILE_NAME)
+                notes.update(during_job(status, events, elapsed))
             time.sleep(POLL_INTERVAL_SECONDS)
     finally:
         channel.close()
 
-    check_word_count_output(SHARED_ROOT / output_name)
+    check_output(SHARED_ROOT / output_name)
     kept_log = RESULTS_ROOT / experiment / f"{_slug(label)}-run{run}.jsonl"
     kept_log.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(SHARED_ROOT / output_name / EVENT_LOG_FILE_NAME, kept_log)
@@ -185,28 +201,44 @@ def run_job(
 
 
 @functools.cache
-def reference_word_count() -> dict[str, int]:
-    """Word counts of the dataset computed in one process, the answer every run must match."""
-    counts: collections.Counter = collections.Counter()
-    for path in sorted((SHARED_ROOT / DEFAULT_INPUT).iterdir()):
-        with path.open(encoding="utf-8") as input_file:
-            for line in input_file:
-                counts.update(line.split())
-    return dict(counts)
+def reference_output() -> dict[str, str]:
+    """The job's correct output, from running its own map() and reduce() over the dataset in one process.
+
+    Using the job's functions (rather than our own word count) means the check
+    agrees with whatever the job does, such as lowercasing words. Each line
+    goes to map() with the same (path, byte offset) key a worker passes.
+    """
+    groups: dict[str, list] = {}
+    with tempfile.TemporaryDirectory() as scratch:
+        job = load_job_functions(DEFAULT_JOB_FILE.read_bytes(), Path(scratch) / "job.py", require_combiner=False)
+        for path in sorted((SHARED_ROOT / DEFAULT_INPUT).iterdir()):
+            container_path = f"/shared/{DEFAULT_INPUT}/{path.name}"
+            with path.open("rb") as input_file:
+                offset = 0
+                for raw_line in input_file:
+                    line = raw_line.removesuffix(b"\n").removesuffix(b"\r").decode("utf-8")
+                    for key, value in job.map((container_path, offset), line):
+                        groups.setdefault(key, []).append(value)
+                    offset += len(raw_line)
+        return {
+            output_key: str(output_value)
+            for key in sorted(groups)
+            for output_key, output_value in job.reduce(key, iter(groups[key]))
+        }
 
 
-def check_word_count_output(output_dir: Path) -> None:
-    """Fail the experiment unless the job's part-r-* files hold exactly the reference counts."""
-    produced: dict[str, int] = {}
+def check_output(output_dir: Path) -> None:
+    """Fail the experiment unless the job's part-r-* files hold exactly the reference output."""
+    produced: dict[str, str] = {}
     for part_file in sorted(output_dir.glob("part-r-*")):
         with part_file.open(encoding="utf-8") as output_file:
             for line in output_file:
-                word, count = line.rstrip("\n").split("\t")
-                if word in produced:
-                    raise ExperimentError(f"{output_dir}: {word!r} appears in more than one output line")
-                produced[word] = int(count)
-    if produced != reference_word_count():
-        raise ExperimentError(f"{output_dir}: output does not match the single-process word count")
+                key, value = line.rstrip("\n").split("\t")
+                if key in produced:
+                    raise ExperimentError(f"{output_dir}: {key!r} appears in more than one output line")
+                produced[key] = value
+    if produced != reference_output():
+        raise ExperimentError(f"{output_dir}: output does not match running the job in a single process")
 
 
 # ----- results on disk -----

@@ -10,6 +10,7 @@ import pytest
 
 from eval import analysis, backup, failures, harness, scaling
 from eval.analysis import AttemptInterval, EventLogError
+from protos import mapreduce_pb2 as pb
 
 
 def started(t, kind, task_id, attempt_id, worker_id, reason="first"):
@@ -92,6 +93,20 @@ def test_extra_attempts_by_cause():
     assert analysis.extra_attempts(FAILURE_AND_BACKUP_LOG) == {"rerun": 2, "timeout": 0, "backup": 1}
 
 
+def test_running_attempts_are_started_but_not_ended():
+    # Partway through FAILURE_AND_BACKUP_LOG, just after the map re-run started on worker-3.
+    so_far = FAILURE_AND_BACKUP_LOG[:9]
+    running = analysis.running_attempts(so_far)
+    assert [(e["kind"], e["task_id"], e["attempt_id"], e["worker_id"]) for e in running] == [("map", 1, 1, "worker-3")]
+
+
+def test_lost_attempts_match_the_worker_and_kind():
+    assert len(analysis.lost_attempts(FAILURE_AND_BACKUP_LOG, "worker-4", "reduce")) == 1
+    assert analysis.lost_attempts(FAILURE_AND_BACKUP_LOG, "worker-4", "map") == []
+    # worker-2 only lost finished map output (map_output_lost), not a running attempt.
+    assert analysis.lost_attempts(FAILURE_AND_BACKUP_LOG, "worker-2", "map") == []
+
+
 def test_spread_is_median_min_max():
     assert analysis.spread([3.0, 1.0, 2.0]) == analysis.Spread(2.0, 1.0, 3.0)
     with pytest.raises(ValueError):
@@ -112,33 +127,110 @@ def test_live_workers_come_from_the_latest_boss_log_line():
     assert harness.live_workers_from_boss_log("boss INFO boss listening on port 5440\n") == []
 
 
-def test_word_count_output_check(tmp_path, monkeypatch):
+def test_live_events_skip_a_half_written_last_line(tmp_path):
+    log = tmp_path / "_events.jsonl"
+    assert harness.read_live_events(log) == []  # not created yet
+    log.write_bytes(json.dumps(SUBMITTED).encode() + b"\n" + b'{"event": "attempt_sta')
+    assert harness.read_live_events(log) == [SUBMITTED]
+
+
+LOWERCASING_WORD_COUNT = b"""
+def map(key, line):
+    for word in line.split():
+        yield word.lower(), 1
+
+def reduce(key, values):
+    yield key, sum(values)
+"""
+
+
+@pytest.fixture
+def dataset(tmp_path, monkeypatch):
+    """A tiny mixed-case dataset and a word count job that lowercases, like examples/wordcount.py."""
     shared = tmp_path / "shared"
     (shared / "input" / "books").mkdir(parents=True)
-    (shared / "input" / "books" / "a.txt").write_bytes(b"the cat\nthe dog\n")
+    (shared / "input" / "books" / "a.txt").write_bytes(b"The cat\nthe dog\n")
+    (shared / "input" / "books" / "b.txt").write_bytes(b"THE Cat\r\n")
+    job_file = tmp_path / "wordcount.py"
+    job_file.write_bytes(LOWERCASING_WORD_COUNT)
     monkeypatch.setattr(harness, "SHARED_ROOT", shared)
-    harness.reference_word_count.cache_clear()
+    monkeypatch.setattr(harness, "DEFAULT_JOB_FILE", job_file)
+    harness.reference_output.cache_clear()
+    yield shared / "output"
+    harness.reference_output.cache_clear()
 
-    good = shared / "output" / "good"
-    good.mkdir(parents=True)
-    (good / "part-r-00000").write_bytes(b"cat\t1\nthe\t2\n")
-    (good / "part-r-00001").write_bytes(b"dog\t1\n")
-    (good / "_events.jsonl").write_bytes(b"{}\n")  # not part of the output
-    harness.check_word_count_output(good)
 
-    wrong = shared / "output" / "wrong"
-    wrong.mkdir()
-    (wrong / "part-r-00000").write_bytes(b"cat\t1\nthe\t1\ndog\t1\n")
+def write_output(folder, parts):
+    folder.mkdir(parents=True)
+    for index, text in enumerate(parts):
+        (folder / f"part-r-{index:05d}").write_bytes(text)
+
+
+def test_reference_runs_the_jobs_own_map_and_reduce(dataset):
+    assert harness.reference_output() == {"cat": "2", "dog": "1", "the": "3"}
+
+
+def test_output_check_accepts_correct_lowercased_output(dataset):
+    write_output(dataset / "good", [b"cat\t2\nthe\t3\n", b"dog\t1\n"])
+    (dataset / "good" / "_events.jsonl").write_bytes(b"{}\n")  # not part of the output
+    harness.check_output(dataset / "good")
+
+
+def test_output_check_rejects_wrong_or_duplicated_output(dataset):
+    write_output(dataset / "case-sensitive", [b"The\t1\nthe\t1\nTHE\t1\ncat\t1\nCat\t1\ndog\t1\n"])
     with pytest.raises(harness.ExperimentError, match="does not match"):
-        harness.check_word_count_output(wrong)
+        harness.check_output(dataset / "case-sensitive")
 
-    duplicated = shared / "output" / "duplicated"
-    duplicated.mkdir()
-    (duplicated / "part-r-00000").write_bytes(b"cat\t1\nthe\t2\n")
-    (duplicated / "part-r-00001").write_bytes(b"the\t2\ndog\t1\n")
+    write_output(dataset / "duplicated", [b"cat\t2\nthe\t3\n", b"the\t3\ndog\t1\n"])
     with pytest.raises(harness.ExperimentError, match="more than one"):
-        harness.check_word_count_output(duplicated)
-    harness.reference_word_count.cache_clear()
+        harness.check_output(dataset / "duplicated")
+
+
+# ----- the failure experiment's kill trigger -----
+
+
+def status(state, map_tasks_done=0):
+    return pb.JobStatus(state=state, num_map_tasks=16, map_tasks_done=map_tasks_done)
+
+
+def test_kill_during_map_waits_for_the_victim_to_run_a_map():
+    victim_mapping = [SUBMITTED, started(0.0, "map", 0, 0, "worker-1"), started(0.0, "map", 1, 0, "worker-2")]
+    victim_idle = victim_mapping + [finished(1.0, "map", 1, 0, "worker-2")]
+    mapping = status(pb.JOB_STATE_MAPPING, map_tasks_done=4)
+
+    assert failures.should_kill(failures.KILL_DURING_MAP, mapping, victim_mapping)
+    assert not failures.should_kill(failures.KILL_DURING_MAP, mapping, victim_idle)
+    # Too early: fewer than a quarter of the maps are done.
+    assert not failures.should_kill(failures.KILL_DURING_MAP, status(pb.JOB_STATE_MAPPING, 3), victim_mapping)
+
+
+def test_kill_during_reduce_waits_for_the_victim_to_run_a_reduce():
+    reducing = status(pb.JOB_STATE_REDUCING, map_tasks_done=16)
+    other_worker_reducing = [SUBMITTED, started(5.0, "reduce", 0, 0, "worker-1")]
+    victim_reducing = other_worker_reducing + [started(5.0, "reduce", 1, 0, "worker-2")]
+
+    assert not failures.should_kill(failures.KILL_DURING_REDUCE, reducing, other_worker_reducing)
+    assert failures.should_kill(failures.KILL_DURING_REDUCE, reducing, victim_reducing)
+
+
+def test_a_kill_that_lost_no_running_attempt_is_rejected(tmp_path):
+    lost = {"event": "attempt_lost", "job_id": "job-1", "t": 4.0, "kind": "map", "task_id": 1, "attempt_id": 0,
+            "worker_id": "worker-2"}
+    no_loss = [SUBMITTED, started(0.0, "map", 1, 0, "worker-2"), finished(1.0, "map", 1, 0, "worker-2"),
+               job_finished(6.0)]
+    kill = {"killed_worker": "worker-2", "kill_t": 1.0}
+    save_fake_results(tmp_path, "failures", [
+        (failures.KILL_DURING_MAP, 1, no_loss[:-1] + [lost, no_loss[-1]], kill),
+        (failures.KILL_DURING_MAP, 2, no_loss, kill),
+        (failures.KILL_DURING_MAP, 3, no_loss, {}),
+    ])
+    lost_run, missed_run, never_killed_run = harness.load_results("failures", tmp_path)
+
+    failures.check_kill_lost_work(failures.KILL_DURING_MAP, lost_run, tmp_path)
+    with pytest.raises(harness.ExperimentError, match="lost no running map attempt"):
+        failures.check_kill_lost_work(failures.KILL_DURING_MAP, missed_run, tmp_path)
+    with pytest.raises(harness.ExperimentError, match="finished before worker-2 could be killed"):
+        failures.check_kill_lost_work(failures.KILL_DURING_MAP, never_killed_run, tmp_path)
 
 
 # ----- plots render from saved results -----

@@ -19,7 +19,7 @@ from pathlib import Path
 from matplotlib.patches import Patch
 
 from eval import style
-from eval.analysis import attempt_intervals, extra_attempts, spread
+from eval.analysis import attempt_intervals, extra_attempts, lost_attempts, running_attempts, spread
 from eval.harness import (
     ALL_WORKERS,
     PLOTS_ROOT,
@@ -44,25 +44,51 @@ NO_FAILURE = "no failure"
 KILL_DURING_MAP = "killed during map"
 KILL_DURING_REDUCE = "killed during reduce"
 LABELS = [NO_FAILURE, KILL_DURING_MAP, KILL_DURING_REDUCE]
+KIND_KILLED = {KILL_DURING_MAP: "map", KILL_DURING_REDUCE: "reduce"}  # the work the kill must interrupt
+
+
+def should_kill(when: str, status: pb.JobStatus, events: list[dict]) -> bool:
+    """Kill only while VICTIM is running a task of the intended kind, so the kill always loses work.
+
+    During the map phase we also wait for a quarter of the maps to finish, so
+    VICTIM likely holds finished map output too, which must be re-run (§3.3).
+    """
+    kind = KIND_KILLED[when]
+    victim_is_busy = any(
+        start["worker_id"] == VICTIM and start["kind"] == kind for start in running_attempts(events)
+    )
+    if when == KILL_DURING_MAP:
+        phase_reached = status.state == pb.JOB_STATE_MAPPING and status.map_tasks_done >= status.num_map_tasks // 4
+    else:
+        phase_reached = status.state == pb.JOB_STATE_REDUCING
+    return phase_reached and victim_is_busy
 
 
 def killer(when: str):
     """A during_job callback that kills VICTIM once, at the chosen point of the job."""
     killed = False
 
-    def during_job(status: pb.JobStatus, elapsed: float) -> dict:
+    def during_job(status: pb.JobStatus, events: list[dict], elapsed: float) -> dict:
         nonlocal killed
-        if killed:
+        if killed or not should_kill(when, status, events):
             return {}
-        in_map_phase = status.state == pb.JOB_STATE_MAPPING and status.map_tasks_done >= status.num_map_tasks // 4
-        in_reduce_phase = status.state == pb.JOB_STATE_REDUCING
-        if (when == KILL_DURING_MAP and in_map_phase) or (when == KILL_DURING_REDUCE and in_reduce_phase):
-            kill_worker(VICTIM)
-            killed = True
-            return {"killed_worker": VICTIM, "kill_t": round(elapsed, 3)}
-        return {}
+        kill_worker(VICTIM)
+        killed = True
+        return {"killed_worker": VICTIM, "kill_t": round(elapsed, 3)}
 
     return during_job
+
+
+def check_kill_lost_work(when: str, result: RunResult, results_root: Path = RESULTS_ROOT) -> None:
+    """The run only counts if the boss saw VICTIM's running attempt die with it."""
+    if "kill_t" not in result.notes:
+        raise ExperimentError(f"{when} run {result.run}: the job finished before {VICTIM} could be killed")
+    kind = KIND_KILLED[when]
+    if not lost_attempts(load_events(result, results_root), VICTIM, kind):
+        raise ExperimentError(
+            f"{when} run {result.run}: killing {VICTIM} lost no running {kind} attempt "
+            f"(did it finish between the check and the kill?); see {result.event_log}"
+        )
 
 
 def run(repeats: int) -> None:
@@ -72,8 +98,8 @@ def run(repeats: int) -> None:
             start_cluster()
             during_job = None if label == NO_FAILURE else killer(label)
             result = run_job(EXPERIMENT, label, repetition, NUM_MAP_TASKS, NUM_REDUCE_TASKS, during_job=during_job)
-            if label != NO_FAILURE and "kill_t" not in result.notes:
-                raise ExperimentError(f"{label} run {repetition}: the job finished before {VICTIM} could be killed")
+            if label != NO_FAILURE:
+                check_kill_lost_work(label, result)
             results.append(result)
     stop_cluster()
     print(f"saved {save_results(EXPERIMENT, results)}")
