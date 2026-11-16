@@ -58,6 +58,7 @@ def load_job_functions(job_code: bytes, source_path: Path, require_combiner: boo
         # a fresh module and cannot observe this attempt through sys.modules.
         sys.modules.pop(module_name, None)
 
+    # A submitted module defines its API dynamically, so inspect its declared names after import.
     map_function = getattr(module, "map", None)
     reduce_function = getattr(module, "reduce", None)
     combine_function = getattr(module, "combine", None)

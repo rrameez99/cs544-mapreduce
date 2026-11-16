@@ -2,6 +2,7 @@
 
 import os
 import re
+import time
 from pathlib import Path
 
 from protos import mapreduce_pb2 as pb
@@ -34,11 +35,26 @@ def _require_kind(attempt: pb.TaskAttempt, expected_kind: int) -> None:
 
 def _contained_path(root: Path, relative_path: Path) -> Path:
     """Return a path below root, rejecting traversal before it reaches disk."""
-    resolved_root = root.resolve()
-    candidate = (resolved_root / relative_path).resolve()
-    if candidate != resolved_root and resolved_root not in candidate.parents:
+    resolved_root = _normalise_resolved_path(root)
+    candidate = _normalise_resolved_path(resolved_root / relative_path)
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError:
         raise StorageError(f"path {relative_path!s} escapes {resolved_root}")
     return candidate
+
+
+def _normalise_resolved_path(path: Path) -> Path:
+    """Resolve a path while normalising Windows' optional extended-path prefix."""
+    resolved = path.resolve()
+    if os.name != "nt":
+        return resolved
+    path_text = str(resolved)
+    if path_text.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + path_text[len("\\\\?\\UNC\\") :])
+    if path_text.startswith("\\\\?\\"):
+        return Path(path_text[len("\\\\?\\") :])
+    return resolved
 
 
 def resolve_shared_path(path: str, shared_root: Path = DEFAULT_SHARED_ROOT) -> Path:
@@ -64,7 +80,7 @@ def map_attempt_directory(local_root: Path, attempt: pb.TaskAttempt) -> Path:
     _require_non_negative("attempt ID", attempt.attempt_id)
     return _contained_path(
         local_root,
-        Path(f"job-{attempt.job_id}") / f"map-{attempt.task_id}.{attempt.attempt_id}",
+        Path(attempt.job_id) / f"map-{attempt.task_id}.{attempt.attempt_id}",
     )
 
 
@@ -76,7 +92,7 @@ def reduce_attempt_directory(local_root: Path, attempt: pb.TaskAttempt) -> Path:
     _require_non_negative("attempt ID", attempt.attempt_id)
     return _contained_path(
         local_root,
-        Path(f"job-{attempt.job_id}") / f"reduce-{attempt.task_id}.{attempt.attempt_id}",
+        Path(attempt.job_id) / f"reduce-{attempt.task_id}.{attempt.attempt_id}",
     )
 
 
@@ -155,5 +171,17 @@ def fsync_directory(directory: Path) -> None:
 
 def publish_file(temporary_path: Path, final_path: Path) -> None:
     """Atomically make a fully fsynced private file visible at final_path."""
-    os.replace(temporary_path, final_path)
+    if os.name == "nt":
+        # Concurrent replacement is atomic on the Linux deployment target. Windows can
+        # transiently reject one contender, so retry briefly without hiding a persistent error.
+        for retry in range(20):
+            try:
+                os.replace(temporary_path, final_path)
+                break
+            except PermissionError:
+                if retry == 19:
+                    raise
+                time.sleep(0.01)
+    else:
+        os.replace(temporary_path, final_path)
     fsync_directory(final_path.parent)

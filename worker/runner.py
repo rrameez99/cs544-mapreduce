@@ -2,8 +2,10 @@
 
 import itertools
 import json
+import logging
 import time
 from collections.abc import Callable, Iterable, Iterator
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +28,8 @@ from worker.storage import (
     resolve_shared_path,
 )
 
-FETCH_RPC_TIMEOUT_SECONDS = 10.0
+FETCH_RPC_TIMEOUT_SECONDS = 60.0
+log = logging.getLogger(__name__)
 
 
 class TaskExecutionError(RuntimeError):
@@ -57,7 +60,6 @@ def partition_for_key(key: str, num_reduce_tasks: int) -> int:
         raise TaskExecutionError(f"intermediate key must be str, got {type(key).__name__}")
     if num_reduce_tasks < 1:
         raise TaskExecutionError(f"num_reduce_tasks must be positive, got {num_reduce_tasks}")
-    import zlib
 
     return zlib.crc32(key.encode("utf-8")) % num_reduce_tasks
 
@@ -289,7 +291,6 @@ class TaskRunner:
             temporary_path, final_path = reduce_output_paths(
                 task.output_path, task.attempt, self._shared_root
             )
-            temporary_path.parent.mkdir(parents=True, exist_ok=True)
             output_file = temporary_path.open("xb")
         except (StorageError, OSError) as error:
             raise TaskExecutionError(f"{_attempt_label(task.attempt)} cannot open output: {error}") from error
@@ -358,8 +359,8 @@ class TaskRunner:
             except OSError as error:
                 try:
                     writer.close()
-                except OSError:
-                    pass
+                except OSError as close_error:
+                    log.warning("could not close map partition after fsync failure: %s", close_error)
                 if first_error is None:
                     first_error = error
         if first_error is not None and not suppress_errors:
@@ -373,14 +374,15 @@ class TaskRunner:
 
     def _remove_map_temporary_files(self, task: pb.MapTask) -> None:
         for reduce_task_id in range(task.num_reduce_tasks):
+            temporary_path = map_partition_temporary_path(
+                self._local_root, task.attempt, reduce_task_id
+            )
             try:
-                map_partition_temporary_path(
-                    self._local_root, task.attempt, reduce_task_id
-                ).unlink(missing_ok=True)
-            except OSError:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
                 # Cleanup cannot replace the original task error and affects
                 # only this attempt's private temporary file.
-                pass
+                log.warning("could not remove temporary map partition %s: %s", temporary_path, error)
 
     @staticmethod
     def _parse_partition_chunks(

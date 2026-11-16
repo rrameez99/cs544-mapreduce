@@ -24,7 +24,7 @@ def start_worker_server(servicer):
 
 def test_fetch_partition_streams_exact_file_in_one_mib_chunks(tmp_path):
     local_root = tmp_path / "local"
-    partition_directory = local_root / "job-job-1" / "map-2.3"
+    partition_directory = local_root / "job-1" / "map-2.3"
     partition_directory.mkdir(parents=True)
     payload = b"x" * (FETCH_CHUNK_BYTES + 17)
     (partition_directory / "part-4.jsonl").write_bytes(payload)
@@ -63,6 +63,7 @@ def test_reduce_fetches_a_mapper_partition_over_grpc(tmp_path):
     mapper_local = tmp_path / "mapper-local"
     reducer_local = tmp_path / "reducer-local"
     shared_root = tmp_path / "shared"
+    (shared_root / "output" / "wc").mkdir(parents=True)
     input_directory = shared_root / "input"
     input_directory.mkdir(parents=True)
     (input_directory / "words.txt").write_text("blue blue green\n", encoding="utf-8")

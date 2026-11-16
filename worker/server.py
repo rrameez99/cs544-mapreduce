@@ -190,7 +190,7 @@ def heartbeat_forever(
             if assignment is not None:
                 if executor.is_running:
                     raise RuntimeError(f"boss sent a {assignment} while this worker is already busy")
-                executor.start(getattr(response, assignment))
+                executor.start(response.map_task if assignment == "map_task" else response.reduce_task)
         time.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
