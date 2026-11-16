@@ -5,6 +5,7 @@ Run with `python -m worker.server` from the repo root (the Docker image does thi
 
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -150,7 +151,28 @@ class AttemptExecutor:
         return f"{attempt.job_id} {kind} task {attempt.task_id} attempt {attempt.attempt_id}"
 
 
-def register(boss: pb_grpc.BossStub, worker_id: str, fetch_address: str) -> None:
+def clear_local_data(local_root: Path) -> None:
+    """Delete everything under local_root, keeping the directory itself.
+
+    Map output on local disk is only useful while the boss still knows this
+    worker. Once it registers again, the boss treats it as a brand-new worker
+    (its old attempts and map outputs were already given to others), so
+    nothing here can ever be fetched again. Leaving it would also collide with
+    new work: job IDs start again at job-1 when the boss restarts, so a new
+    job-1 attempt would find an old job-1 directory already there.
+    """
+    local_root.mkdir(parents=True, exist_ok=True)
+    for entry in local_root.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
+def register(boss: pb_grpc.BossStub, worker_id: str, fetch_address: str, local_root: Path) -> None:
+    # Clear before registering, so no task from the new registration can
+    # start writing while old files are still being deleted.
+    clear_local_data(local_root)
     boss.Register(
         pb.RegisterRequest(worker_id=worker_id, fetch_address=fetch_address),
         timeout=RPC_TIMEOUT_SECONDS,
@@ -162,6 +184,7 @@ def heartbeat_forever(
     boss: pb_grpc.BossStub,
     worker_id: str,
     fetch_address: str,
+    local_root: Path,
     executor: AttemptExecutor,
 ) -> None:
     last_contact_time = time.monotonic()
@@ -175,7 +198,7 @@ def heartbeat_forever(
             if error.code() == grpc.StatusCode.NOT_FOUND:
                 # The boss declared us dead (or restarted). Start over as a new registration.
                 log.warning("boss does not know this worker (%s); registering again", error.details())
-                register(boss, worker_id, fetch_address)
+                register(boss, worker_id, fetch_address, local_root)
                 last_contact_time = time.monotonic()
             elif error.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
                 unreachable_seconds = time.monotonic() - last_contact_time
@@ -217,10 +240,10 @@ def main() -> None:
         sys.exit(f"could not reach the boss at {boss_address} within {BOSS_UNREACHABLE_LIMIT_SECONDS:.0f}s")
     boss = pb_grpc.BossStub(channel)
 
-    register(boss, worker_id, fetch_address)
+    register(boss, worker_id, fetch_address, local_root)
     runner = TaskRunner(local_root, shared_root)
     executor = AttemptExecutor(boss, worker_id, runner)
-    heartbeat_forever(boss, worker_id, fetch_address, executor)
+    heartbeat_forever(boss, worker_id, fetch_address, local_root, executor)
 
 
 if __name__ == "__main__":
