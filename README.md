@@ -218,14 +218,15 @@ Project Gutenberg books:
 The evaluation dataset uses the official Project Gutenberg mirror at
 `https://gutenberg.pglaf.org/cache/epub/<id>/pg<id>.txt`; the main
 `gutenberg.org` site returned HTTP 503 during dataset setup. Download the
-plain-text files and generate the deterministic input directory:
+plain-text files outside the repository, then generate the deterministic input
+directory:
 
 ```bash
-mkdir -p books
+mkdir -p ~/gutenberg
 for id in 1342 2701 84 1661 11 98 1400 2600; do
-  curl -fL "https://gutenberg.pglaf.org/cache/epub/$id/pg$id.txt" -o "books/pg$id.txt"
+  curl -fL "https://gutenberg.pglaf.org/cache/epub/$id/pg$id.txt" -o ~/gutenberg/pg$id.txt
 done
-python scripts/make_data.py books/pg*.txt
+python scripts/make_data.py ~/gutenberg/pg*.txt
 ```
 
 `make_data.py` sorts the source paths, verifies UTF-8, ensures every source
