@@ -5,6 +5,7 @@ the ones boss/jobs.py writes (see test_scheduler.py for the real thing).
 """
 
 import json
+import subprocess
 
 import pytest
 
@@ -123,6 +124,25 @@ def test_spread_is_median_min_max():
 
 
 # ----- harness helpers that don't need a cluster -----
+
+
+def test_start_cluster_overrides_the_task_timeout_only_when_asked(monkeypatch):
+    commands = []
+
+    def fake_run(command, cwd, capture_output, text, env):
+        commands.append((command, env))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    monkeypatch.setattr(harness, "wait_for_live_workers", lambda num_workers: None)
+
+    harness.start_cluster(2, task_timeout_seconds=600)
+    harness.start_cluster(2)
+
+    ups = [(command, env) for command, env in commands if "up" in command]
+    assert ups[0][0][-3:] == ["boss", "worker-1", "worker-2"]
+    assert ups[0][1]["TASK_TIMEOUT_SECONDS"] == "600"
+    assert ups[1][1] is None  # docker-compose.yml's default applies
 
 
 def test_live_workers_come_from_the_latest_boss_log_line():

@@ -5,6 +5,11 @@ Three configurations, same job:
   - straggler:           worker-4 gets 0.2 CPUs (docker-compose.straggler.yml)
   - straggler + backups: the same slow worker, with --backup-tasks
 
+Every configuration runs with the boss's task timeout raised to 600 s. At the
+default 30 s, the timeout re-runs the straggler's slow reduce by itself, which
+hides what backup tasks do (README, plot 5). With 600 s, nothing but a backup
+task can rescue the straggler, as in the paper's Figure 3.
+
 The left panel shows tasks completed over time for one typical run of each:
 with a straggler, the last few tasks drag on; with backups, idle workers
 re-run them and the tail disappears. The right panel compares job times.
@@ -28,17 +33,18 @@ STRAGGLER = "straggler"
 STRAGGLER_WITH_BACKUPS = "straggler + backups"
 LABELS = [NORMAL, STRAGGLER, STRAGGLER_WITH_BACKUPS]
 COLORS = {NORMAL: style.BLUE, STRAGGLER: style.ORANGE, STRAGGLER_WITH_BACKUPS: style.AQUA}
+TASK_TIMEOUT_SECONDS = 600  # far longer than any task here, so timeouts never fire
 
 
 def run(repeats: int) -> None:
     results = []
     for label in LABELS:
         for repetition in range(1, repeats + 1):
-            start_cluster(straggler=label != NORMAL)
-            results.append(
-                run_job(EXPERIMENT, label, repetition, NUM_MAP_TASKS, NUM_REDUCE_TASKS,
-                        use_backup_tasks=label == STRAGGLER_WITH_BACKUPS)
-            )
+            start_cluster(straggler=label != NORMAL, task_timeout_seconds=TASK_TIMEOUT_SECONDS)
+            result = run_job(EXPERIMENT, label, repetition, NUM_MAP_TASKS, NUM_REDUCE_TASKS,
+                             use_backup_tasks=label == STRAGGLER_WITH_BACKUPS)
+            result.notes["task_timeout_seconds"] = TASK_TIMEOUT_SECONDS
+            results.append(result)
     stop_cluster()
     print(f"saved {save_results(EXPERIMENT, results)}")
 
@@ -71,7 +77,7 @@ def plot(results_root: Path = RESULTS_ROOT, plots_root: Path = PLOTS_ROOT) -> Pa
     curves_axis.set_ylim(0, total_tasks * 1.12)
     curves_axis.set_yticks(range(0, total_tasks + 1, 5))
     curves_axis.set_xlim(left=0)
-    style.title(curves_axis, "Tasks completed over time", f"Median run of each; {total_tasks} tasks per job")
+    style.title(curves_axis, "Tasks completed over time", f"Median run of each; {total_tasks} tasks per job; task timeout {TASK_TIMEOUT_SECONDS} s")
     style.label_axes(curves_axis, "Seconds since the job was submitted", "Tasks completed")
     curves_axis.legend(frameon=False, fontsize=9, loc="lower right", labelcolor=style.TEXT_PRIMARY)
 

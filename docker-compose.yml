@@ -30,6 +30,10 @@ services:
       - ./shared:/shared
     environment:
       BOSS_PORT: "5440"
+      # An attempt running longer than this gets a second attempt elsewhere
+      # (design.md §5.1). eval/backup.py raises it so that only backup tasks
+      # can rescue a straggler.
+      TASK_TIMEOUT_SECONDS: "${TASK_TIMEOUT_SECONDS:-30}"
 
   worker-1:
     <<: *worker

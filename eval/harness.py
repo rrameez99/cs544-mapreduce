@@ -9,6 +9,7 @@ alone, without rerunning anything.
 
 import functools
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -60,23 +61,33 @@ class RunResult:
 # ----- cluster control -----
 
 
-def _compose(*args: str, straggler: bool = False) -> subprocess.CompletedProcess:
+def _compose(*args: str, straggler: bool = False, task_timeout_seconds: int | None = None) -> subprocess.CompletedProcess:
     files = ["-f", "docker-compose.yml"]
     if straggler:
         files += ["-f", STRAGGLER_COMPOSE_FILE]
     command = ["docker", "compose", *files, *args]
-    completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
+    # docker-compose.yml reads TASK_TIMEOUT_SECONDS from this environment; unset means its default.
+    environment = None
+    if task_timeout_seconds is not None:
+        environment = {**os.environ, "TASK_TIMEOUT_SECONDS": str(task_timeout_seconds)}
+    completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, env=environment)
     if completed.returncode != 0:
         raise ExperimentError(f"`{' '.join(command)}` failed:\n{completed.stderr.strip()}")
     return completed
 
 
-def start_cluster(num_workers: int = len(ALL_WORKERS), straggler: bool = False) -> None:
-    """Start a fresh cluster (boss plus the first num_workers workers) and wait until they all registered."""
+def start_cluster(
+    num_workers: int = len(ALL_WORKERS), straggler: bool = False, task_timeout_seconds: int | None = None
+) -> None:
+    """Start a fresh cluster (boss plus the first num_workers workers) and wait until they all registered.
+
+    task_timeout_seconds overrides the boss's task timeout; None keeps docker-compose.yml's 30 s.
+    """
     if not 1 <= num_workers <= len(ALL_WORKERS):
         raise ExperimentError(f"num_workers must be 1-{len(ALL_WORKERS)}, got {num_workers}")
     _compose("down")
-    _compose("up", "-d", "boss", *ALL_WORKERS[:num_workers], straggler=straggler)
+    _compose("up", "-d", "boss", *ALL_WORKERS[:num_workers], straggler=straggler,
+             task_timeout_seconds=task_timeout_seconds)
     wait_for_live_workers(num_workers)
 
 
