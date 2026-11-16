@@ -595,3 +595,37 @@ def test_reduce_phase_gets_backups_too(scheduler):
 
     assert backup.attempt.kind == pb.TASK_KIND_REDUCE
     assert (backup.attempt.task_id, backup.attempt.attempt_id) == (reduce_task.attempt.task_id, 1)
+
+
+# ----- review fixes -----
+
+
+def test_straggler_reporting_after_its_backup_finished_the_job_is_a_duplicate(scheduler, events):
+    job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, use_backup_tasks=True)
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+    straggler = assign(scheduler, "worker-1")  # the only reduce task
+    backup = assign(scheduler, "worker-2")
+
+    finish(scheduler, "worker-2", backup)
+    assert scheduler.job_status(job_id).state == pb.JOB_STATE_SUCCEEDED
+
+    assert finish(scheduler, "worker-1", straggler) is False
+    assert scheduler.duplicate_reports(job_id) == 1
+    assert events.named("attempt_finished")[-1]["outcome"] == "duplicate"
+
+
+class FailingEventLog:
+    def record(self, output_path: str, event: dict) -> None:
+        raise OSError("No space left on device")
+
+
+def test_event_log_failures_do_not_break_scheduling(clock, caplog):
+    scheduler = Scheduler(TIMEOUT_SECONDS, clock=clock, events=FailingEventLog())
+    job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+
+    assert scheduler.job_status(job_id).state == pb.JOB_STATE_SUCCEEDED
+    dropped_messages = [record.getMessage() for record in caplog.records if "events dropped" in record.getMessage()]
+    assert dropped_messages, "every lost event should be logged as an error"
+    assert "No space left on device" in dropped_messages[-1]

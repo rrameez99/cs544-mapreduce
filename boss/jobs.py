@@ -174,6 +174,7 @@ class Scheduler:
         self._task_timeout_seconds = task_timeout_seconds
         self._clock = clock
         self._events = events
+        self._dropped_events = 0  # events the log could not store (see _record)
         self._lock = threading.Lock()
         self._jobs: dict[str, Job] = {}  # insertion order = submission order, so jobs run FIFO
         self._job_numbers = itertools.count(1)
@@ -275,9 +276,9 @@ class Scheduler:
                     bytes_fetched=metrics.bytes_fetched,
                 )
 
-            if job.is_finished:
-                record_finish("after job finished")
-                return False
+            # Check for a duplicate before checking whether the job is over: when a
+            # backup wins a job's last task, the losing attempt reports after the
+            # job has finished, and it is still a duplicate.
             if task.state == TaskState.DONE:
                 job.duplicate_reports += 1
                 finished_backup = self._running_attempt(task, attempt.attempt_id, worker_id)
@@ -288,6 +289,10 @@ class Scheduler:
                     job.job_id, attempt.attempt_id, task.name, task.accepted_attempt.attempt_id,
                 )
                 record_finish("duplicate")
+                return False
+            if job.is_finished:
+                # Only a failed job can finish with this task undone.
+                record_finish("after job finished")
                 return False
             running = self._running_attempt(task, attempt.attempt_id, worker_id)
             if running is None:
@@ -446,7 +451,19 @@ class Scheduler:
             "t": round(self._clock() - job.submit_time, 3),
             **fields,
         }
-        self._events.record(job.spec.output_path, event)
+        try:
+            self._events.record(job.spec.output_path, event)
+        except OSError as error:
+            # The event log is for evaluation, not correctness. By the time an
+            # event is recorded, the scheduling decision it describes has already
+            # been made, so failing here would only turn a correct RPC into an
+            # error. Report the loss loudly instead; any plot built from this
+            # job's log is then incomplete.
+            self._dropped_events += 1
+            log.error(
+                "%s: could not write %s event to %s (%d events dropped so far): %s",
+                job.job_id, event_name, job.spec.output_path, self._dropped_events, error,
+            )
 
     @staticmethod
     def _attempt_fields(task: Task, attempt_id: int, worker_id: str) -> dict:
