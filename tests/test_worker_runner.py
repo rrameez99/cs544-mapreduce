@@ -2,8 +2,11 @@
 
 import json
 import os
+import random
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -248,6 +251,74 @@ def test_reduce_reassembles_chunked_jsonl_and_groups_sorted_keys(roots):
     assert result.metrics.records_out == 2
     assert result.metrics.bytes_fetched == len(b'["b",1]\n["a",2') + len(b']\n["a",3]\n')
     assert result.metrics.bytes_written == len(output.encode("utf-8"))
+
+
+def test_reduce_sees_values_in_fetch_order_and_writes_keys_sorted(roots):
+    local_root, shared_root = roots
+    (shared_root / "output" / "wc").mkdir(parents=True)
+    locations = [
+        pb.MapOutputLocation(map_task_id=0, attempt_id=0, fetch_address="mapper-0:5441"),
+        pb.MapOutputLocation(map_task_id=1, attempt_id=0, fetch_address="mapper-1:5441"),
+    ]
+    partitions = {0: [b'["b","x"]\n["a","first"]\n'], 1: [b'["a","second"]\n["c","y"]\n']}
+    joining_job = b"""
+def map(key, line):
+    yield line, 1
+
+def reduce(key, values):
+    yield key, "+".join(values)
+"""
+
+    def fetch_partition(location, _task):
+        return partitions[location.map_task_id]
+
+    TaskRunner(local_root, shared_root, fetch_partition=fetch_partition).run_reduce(
+        reduce_task(locations=locations, job_code=joining_job)
+    )
+
+    output = (shared_root / "output" / "wc" / "part-r-00000").read_text(encoding="utf-8")
+    assert output == "a\tfirst+second\nb\tx\nc\ty\n"
+
+
+def test_reduce_never_holds_the_gil_long_enough_to_stall_heartbeats(roots):
+    """Regression test: sorting every record held the GIL for seconds on large
+    partitions, so the heartbeat thread stopped and the boss marked the worker dead."""
+    local_root, shared_root = roots
+    (shared_root / "output" / "wc").mkdir(parents=True)
+    location = pb.MapOutputLocation(map_task_id=0, attempt_id=0, fetch_address="mapper:5441")
+    shuffled_keys = random.Random(544)
+    chunk = b"".join(b'["word%d",1]\n' % shuffled_keys.randrange(50_000) for _ in range(200_000))
+
+    def fetch_partition(_location, _task):
+        return [chunk] * 10  # 2 million records in random key order, at most 50,000 distinct keys
+
+    longest_gap = 0.0
+    reducing = threading.Event()
+    reducing.set()
+
+    def heartbeat():
+        nonlocal longest_gap
+        last = time.monotonic()
+        while reducing.is_set():
+            time.sleep(0.01)
+            now = time.monotonic()
+            longest_gap = max(longest_gap, now - last)
+            last = now
+
+    heartbeat_thread = threading.Thread(target=heartbeat)
+    heartbeat_thread.start()
+    try:
+        result = TaskRunner(local_root, shared_root, fetch_partition=fetch_partition).run_reduce(
+            reduce_task(locations=[location])
+        )
+    finally:
+        reducing.clear()
+        heartbeat_thread.join()
+
+    assert result.metrics.records_in == 2_000_000
+    # Sorting all 2 million records stalled this thread for about 1s; the boss
+    # declares a worker dead after 3s, and real partitions are several times larger.
+    assert longest_gap < 0.25
 
 
 def test_reduce_fails_if_boss_did_not_create_output_directory(roots):
