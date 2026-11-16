@@ -7,6 +7,7 @@ that the RPCs reach it correctly, validate paths, and return the right status co
 import grpc
 import pytest
 
+from boss.events import JsonlEventLog, read_events
 from boss.jobs import Scheduler
 from boss.server import build_server, reschedule_work_of_dead_workers
 from boss.workers import WorkerRegistry
@@ -40,7 +41,10 @@ def shared_root(tmp_path):
 
 @pytest.fixture
 def boss_state(clock):
-    return WorkerRegistry(HEARTBEAT_TIMEOUT_SECONDS, clock=clock), Scheduler(TASK_TIMEOUT_SECONDS, clock=clock)
+    return (
+        WorkerRegistry(HEARTBEAT_TIMEOUT_SECONDS, clock=clock),
+        Scheduler(TASK_TIMEOUT_SECONDS, clock=clock, events=JsonlEventLog()),
+    )
 
 
 @pytest.fixture
@@ -80,8 +84,10 @@ def heartbeat(boss, worker_id, ready_for_task=True) -> pb.HeartbeatResponse:
     return boss.Heartbeat(pb.HeartbeatRequest(worker_id=worker_id, ready_for_task=ready_for_task))
 
 
-def report_done(boss, worker_id, attempt) -> bool:
-    return boss.ReportTaskDone(pb.TaskDoneReport(worker_id=worker_id, attempt=attempt)).accepted
+def report_done(boss, worker_id, attempt, metrics: pb.TaskMetrics | None = None) -> bool:
+    if metrics is None:
+        metrics = pb.TaskMetrics()
+    return boss.ReportTaskDone(pb.TaskDoneReport(worker_id=worker_id, attempt=attempt, metrics=metrics)).accepted
 
 
 def status_code_of(call) -> grpc.StatusCode:
@@ -159,7 +165,7 @@ def test_whole_job_through_rpcs(boss, shared_root):
     assert [task.attempt.task_id for task in maps] == [0, 1]
     assert heartbeat(boss, "worker-1").WhichOneof("assignment") is None  # both maps running
 
-    assert report_done(boss, "worker-1", maps[0].attempt)
+    assert report_done(boss, "worker-1", maps[0].attempt, pb.TaskMetrics(records_out=7, bytes_written=70))
     assert report_done(boss, "worker-2", maps[1].attempt)
     status = boss.GetJobStatus(pb.GetJobStatusRequest(job_id=job_id))
     assert status.state == pb.JOB_STATE_REDUCING
@@ -172,6 +178,13 @@ def test_whole_job_through_rpcs(boss, shared_root):
     status = boss.GetJobStatus(pb.GetJobStatusRequest(job_id=job_id))
     assert status.state == pb.JOB_STATE_SUCCEEDED
     assert (status.map_tasks_done, status.reduce_tasks_done) == (2, 1)
+
+    # The job's event log sits next to its output, with the worker's metrics in it.
+    events = read_events(str(shared_root / "output"))
+    assert events[0]["event"] == "job_submitted"
+    assert events[-1] == {**events[-1], "event": "job_finished", "state": "SUCCEEDED"}
+    first_map_finish = next(e for e in events if e["event"] == "attempt_finished")
+    assert (first_map_finish["records_out"], first_map_finish["bytes_written"]) == (7, 70)
 
 
 def test_duplicate_completion_is_acknowledged_but_not_accepted(boss, shared_root, clock):

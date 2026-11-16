@@ -1,0 +1,10 @@
+# Turns worker-4 into a straggler for the backup-task experiment: it gets a
+# fifth of a CPU instead of a whole one, so every task it runs takes about
+# five times longer. Nothing else changes, so the slowdown is a real slow
+# machine rather than an artificial delay in the code.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.straggler.yml up -d
+services:
+  worker-4:
+    cpus: 0.2

@@ -30,12 +30,30 @@ def clock():
     return FakeClock()
 
 
+class RecordingEventLog:
+    """Keeps events in memory instead of writing files."""
+
+    def __init__(self):
+        self.events = []
+
+    def record(self, output_path: str, event: dict) -> None:
+        self.events.append(event)
+
+    def named(self, event_name: str) -> list[dict]:
+        return [event for event in self.events if event["event"] == event_name]
+
+
 @pytest.fixture
-def scheduler(clock):
-    return Scheduler(TIMEOUT_SECONDS, clock=clock)
+def events():
+    return RecordingEventLog()
 
 
-def make_spec(num_map_tasks=2, num_reduce_tasks=2) -> pb.JobSpec:
+@pytest.fixture
+def scheduler(clock, events):
+    return Scheduler(TIMEOUT_SECONDS, clock=clock, events=events)
+
+
+def make_spec(num_map_tasks=2, num_reduce_tasks=2, use_backup_tasks=False) -> pb.JobSpec:
     return pb.JobSpec(
         input_path="/shared/input",
         output_path="/shared/output",
@@ -43,12 +61,13 @@ def make_spec(num_map_tasks=2, num_reduce_tasks=2) -> pb.JobSpec:
         job_code=b"def map(k, v): ...\ndef reduce(k, vs): ...\n",
         num_map_tasks=num_map_tasks,
         num_reduce_tasks=num_reduce_tasks,
+        use_backup_tasks=use_backup_tasks,
     )
 
 
-def submit(scheduler, num_map_tasks=2, num_reduce_tasks=2, input_bytes=100) -> str:
+def submit(scheduler, num_map_tasks=2, num_reduce_tasks=2, input_bytes=100, use_backup_tasks=False) -> str:
     return scheduler.submit_job(
-        make_spec(num_map_tasks, num_reduce_tasks), [("/shared/input/a.txt", input_bytes)]
+        make_spec(num_map_tasks, num_reduce_tasks, use_backup_tasks), [("/shared/input/a.txt", input_bytes)]
     )
 
 
@@ -56,8 +75,10 @@ def assign(scheduler, worker_id):
     return scheduler.assign_task(worker_id, f"{worker_id}:5441")
 
 
-def finish(scheduler, worker_id, task) -> bool:
-    return scheduler.report_task_done(worker_id, task.attempt)
+def finish(scheduler, worker_id, task, metrics: pb.TaskMetrics | None = None) -> bool:
+    if metrics is None:
+        metrics = pb.TaskMetrics()
+    return scheduler.report_task_done(worker_id, task.attempt, metrics)
 
 
 def run_all_maps(scheduler, num_map_tasks):
@@ -253,14 +274,14 @@ def test_report_from_a_worker_that_was_not_given_the_attempt_is_ignored(schedule
 def test_report_for_an_attempt_that_was_never_assigned_is_ignored(scheduler):
     job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
     made_up = pb.TaskAttempt(job_id=job_id, kind=pb.TASK_KIND_MAP, task_id=0, attempt_id=7)
-    assert scheduler.report_task_done("worker-1", made_up) is False
+    assert scheduler.report_task_done("worker-1", made_up, pb.TaskMetrics()) is False
 
 
 def test_report_for_a_task_that_does_not_exist_raises(scheduler):
     job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
     bad = pb.TaskAttempt(job_id=job_id, kind=pb.TASK_KIND_MAP, task_id=5, attempt_id=0)
     with pytest.raises(InvalidReportError):
-        scheduler.report_task_done("worker-1", bad)
+        scheduler.report_task_done("worker-1", bad, pb.TaskMetrics())
 
 
 def test_report_from_a_dead_worker_is_ignored(scheduler):
@@ -383,3 +404,228 @@ def test_unfetchable_report_with_an_old_location_does_not_rerun_the_map_again(sc
     next_task = assign(scheduler, "worker-2")
     assert next_task.attempt.kind == pb.TASK_KIND_REDUCE
     assert next_task.map_outputs[0].fetch_address == "worker-4:5441"
+
+
+# ----- event log -----
+
+
+def test_events_trace_a_whole_job(scheduler, events, clock):
+    job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, input_bytes=100)
+    clock.now += 1
+    map_task = assign(scheduler, "worker-1")
+    clock.now += 2
+    finish(scheduler, "worker-1", map_task, pb.TaskMetrics(records_in=5, records_out=9, bytes_written=120))
+    finish(scheduler, "worker-2", assign(scheduler, "worker-2"))
+
+    assert [event["event"] for event in events.events] == [
+        "job_submitted",
+        "attempt_started",
+        "attempt_finished",
+        "attempt_started",
+        "attempt_finished",
+        "job_finished",
+    ]
+    assert all(event["job_id"] == job_id for event in events.events)
+    assert events.named("job_submitted")[0]["input_bytes"] == 100
+
+    map_start, reduce_start = events.named("attempt_started")
+    assert (map_start["kind"], map_start["worker_id"], map_start["reason"], map_start["t"]) == (
+        "map", "worker-1", "first", 1.0
+    )
+    map_finish = events.named("attempt_finished")[0]
+    assert (map_finish["outcome"], map_finish["t"]) == ("accepted", 3.0)
+    assert (map_finish["records_in"], map_finish["records_out"], map_finish["bytes_written"]) == (5, 9, 120)
+    assert reduce_start["kind"] == "reduce"
+    assert events.named("job_finished")[0]["state"] == "SUCCEEDED"
+
+
+def test_events_mark_timeout_retries_and_duplicates(scheduler, events, clock):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
+    slow = assign(scheduler, "worker-1")
+    clock.now += TIMEOUT_SECONDS + 1
+    fast = assign(scheduler, "worker-2")
+    finish(scheduler, "worker-2", fast)
+    finish(scheduler, "worker-1", slow)
+
+    assert [event["reason"] for event in events.named("attempt_started")] == ["first", "timeout"]
+    assert [(event["worker_id"], event["outcome"]) for event in events.named("attempt_finished")] == [
+        ("worker-2", "accepted"),
+        ("worker-1", "duplicate"),
+    ]
+
+
+def test_events_record_work_lost_with_a_dead_worker(scheduler, events):
+    submit(scheduler, num_map_tasks=2, num_reduce_tasks=1)
+    run_all_maps(scheduler, 2)  # map 0 on worker-1, map 1 on worker-2
+    reduce_task = assign(scheduler, "worker-1")
+
+    scheduler.handle_dead_worker("worker-1")
+    redo = assign(scheduler, "worker-3")
+
+    lost = events.named("attempt_lost")
+    assert [(e["kind"], e["task_id"], e["worker_id"]) for e in lost] == [("reduce", 0, "worker-1")]
+    assert lost[0]["attempt_id"] == reduce_task.attempt.attempt_id
+    output_lost = events.named("map_output_lost")
+    assert [(e["task_id"], e["worker_id"], e["reason"]) for e in output_lost] == [(0, "worker-1", "worker died")]
+    assert events.named("attempt_started")[-1]["reason"] == "rerun"
+    assert redo.attempt.task_id == 0
+
+
+def test_events_record_failures_and_the_failed_job(scheduler, events):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
+    for _ in range(MAX_FAILURES_PER_TASK):
+        fail(scheduler, "worker-1", assign(scheduler, "worker-1"), error="KeyError: 'x'")
+
+    failures = events.named("attempt_failed")
+    assert [event["outcome"] for event in failures] == ["counted"] * MAX_FAILURES_PER_TASK
+    assert failures[0]["error"] == "KeyError: 'x'"
+    finished = events.named("job_finished")
+    assert finished[0]["state"] == "FAILED"
+    assert "KeyError" in finished[0]["failure_reason"]
+
+
+def test_events_record_unfetchable_map_output(scheduler, events):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
+    run_all_maps(scheduler, 1)
+    reduce_task = assign(scheduler, "worker-2")
+    fail(scheduler, "worker-2", reduce_task, error="connection refused", unfetchable_map_task_id=0)
+
+    assert events.named("attempt_failed")[0]["outcome"] == "map output unfetchable"
+    assert events.named("attempt_failed")[0]["unfetchable_map_task_id"] == 0
+    assert [(e["task_id"], e["reason"]) for e in events.named("map_output_lost")] == [(0, "unfetchable")]
+
+
+def test_stale_reports_are_logged_as_stale(scheduler, events):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
+    task = assign(scheduler, "worker-1")
+    finish(scheduler, "worker-9", task)  # not the worker that was given this attempt
+    assert events.named("attempt_finished")[0]["outcome"] == "stale"
+
+
+# ----- backup tasks -----
+
+
+def start_maps_on_workers(scheduler, worker_ids):
+    """Give one map task to each worker, in order. Returns the tasks."""
+    return [assign(scheduler, worker_id) for worker_id in worker_ids]
+
+
+def test_no_backups_unless_the_job_asks_for_them(scheduler):
+    submit(scheduler, num_map_tasks=2, num_reduce_tasks=1, use_backup_tasks=False)
+    first, second = start_maps_on_workers(scheduler, ["worker-1", "worker-2"])
+    finish(scheduler, "worker-1", first)  # one map left, but backups are off
+
+    assert assign(scheduler, "worker-3") is None
+
+
+def test_last_running_task_gets_a_backup_on_an_idle_worker(scheduler, events):
+    submit(scheduler, num_map_tasks=2, num_reduce_tasks=1, use_backup_tasks=True)
+    first, straggler = start_maps_on_workers(scheduler, ["worker-1", "worker-2"])
+    finish(scheduler, "worker-1", first)
+
+    backup = assign(scheduler, "worker-1")  # no timeout needed
+    assert (backup.attempt.task_id, backup.attempt.attempt_id) == (straggler.attempt.task_id, 1)
+    assert events.named("attempt_started")[-1]["reason"] == "backup"
+
+
+def test_backup_is_never_on_the_worker_already_running_the_task(scheduler):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, use_backup_tasks=True)
+    assign(scheduler, "worker-1")
+    assert assign(scheduler, "worker-1") is None
+
+
+def test_each_task_gets_at_most_one_backup(scheduler):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, use_backup_tasks=True)
+    assign(scheduler, "worker-1")
+    assert assign(scheduler, "worker-2").attempt.attempt_id == 1
+    assert assign(scheduler, "worker-3") is None
+
+
+def test_no_backups_while_much_of_the_phase_is_unfinished(scheduler):
+    # 20 map tasks: backups start only when at most ceil(BACKUP_PHASE_FRACTION * 20) = 2 are unfinished.
+    submit(scheduler, num_map_tasks=20, num_reduce_tasks=1, use_backup_tasks=True)
+    tasks = start_maps_on_workers(scheduler, [f"worker-{i}" for i in range(20)])
+    for i, task in enumerate(tasks[:17]):
+        finish(scheduler, f"worker-{i}", task)
+
+    assert assign(scheduler, "worker-0") is None  # 3 unfinished: too early
+
+    finish(scheduler, "worker-17", tasks[17])
+    backup = assign(scheduler, "worker-0")  # 2 unfinished: back them up
+    assert backup.attempt.task_id in (18, 19)
+
+
+def test_no_backups_while_some_task_has_not_started(scheduler):
+    submit(scheduler, num_map_tasks=2, num_reduce_tasks=1, use_backup_tasks=True)
+    assign(scheduler, "worker-1")
+    second = assign(scheduler, "worker-2")
+    assert second.attempt.attempt_id == 0  # the idle task, not a backup of the first
+
+
+def test_longest_running_task_is_backed_up_first(scheduler, clock):
+    submit(scheduler, num_map_tasks=20, num_reduce_tasks=1, use_backup_tasks=True)
+    tasks = []
+    for i in range(20):
+        tasks.append(assign(scheduler, f"worker-{i}"))
+        clock.now += 1  # task i started at second i
+    for i, task in enumerate(tasks):
+        if i not in (5, 12):
+            finish(scheduler, f"worker-{i}", task)
+
+    assert assign(scheduler, "worker-0").attempt.task_id == 5
+    assert assign(scheduler, "worker-1").attempt.task_id == 12
+
+
+def test_backup_wins_and_the_straggler_becomes_a_duplicate(scheduler, events):
+    job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, use_backup_tasks=True)
+    straggler = assign(scheduler, "worker-1")
+    backup = assign(scheduler, "worker-2")
+
+    assert finish(scheduler, "worker-2", backup) is True
+    assert finish(scheduler, "worker-1", straggler) is False
+    assert scheduler.duplicate_reports(job_id) == 1
+    assert assign(scheduler, "worker-3").map_outputs[0].fetch_address == "worker-2:5441"
+
+
+def test_reduce_phase_gets_backups_too(scheduler):
+    submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, use_backup_tasks=True)
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+    reduce_task = assign(scheduler, "worker-1")
+    backup = assign(scheduler, "worker-2")
+
+    assert backup.attempt.kind == pb.TASK_KIND_REDUCE
+    assert (backup.attempt.task_id, backup.attempt.attempt_id) == (reduce_task.attempt.task_id, 1)
+
+
+# ----- review fixes -----
+
+
+def test_straggler_reporting_after_its_backup_finished_the_job_is_a_duplicate(scheduler, events):
+    job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1, use_backup_tasks=True)
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+    straggler = assign(scheduler, "worker-1")  # the only reduce task
+    backup = assign(scheduler, "worker-2")
+
+    finish(scheduler, "worker-2", backup)
+    assert scheduler.job_status(job_id).state == pb.JOB_STATE_SUCCEEDED
+
+    assert finish(scheduler, "worker-1", straggler) is False
+    assert scheduler.duplicate_reports(job_id) == 1
+    assert events.named("attempt_finished")[-1]["outcome"] == "duplicate"
+
+
+class FailingEventLog:
+    def record(self, output_path: str, event: dict) -> None:
+        raise OSError("No space left on device")
+
+
+def test_event_log_failures_do_not_break_scheduling(clock, caplog):
+    scheduler = Scheduler(TIMEOUT_SECONDS, clock=clock, events=FailingEventLog())
+    job_id = submit(scheduler, num_map_tasks=1, num_reduce_tasks=1)
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+    finish(scheduler, "worker-1", assign(scheduler, "worker-1"))
+
+    assert scheduler.job_status(job_id).state == pb.JOB_STATE_SUCCEEDED
+    dropped_messages = [record.getMessage() for record in caplog.records if "events dropped" in record.getMessage()]
+    assert dropped_messages, "every lost event should be logged as an error"
+    assert "No space left on device" in dropped_messages[-1]
