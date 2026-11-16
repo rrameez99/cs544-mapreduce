@@ -9,6 +9,7 @@ state: WorkerRegistry (boss/workers.py: who is alive) and Scheduler
 
 import logging
 import os
+import sys
 import threading
 import time
 from concurrent import futures
@@ -29,8 +30,6 @@ SHARED_ROOT = "/shared"
 # Workers heartbeat every second (see worker/server.py), so 3 missed heartbeats mean dead.
 HEARTBEAT_TIMEOUT_SECONDS = 3.0
 LIVENESS_CHECK_INTERVAL_SECONDS = 1.0
-# An attempt running longer than this gets a second attempt elsewhere (design.md §5.1).
-TASK_TIMEOUT_SECONDS = 30.0
 GRPC_THREADS = 16
 
 log = logging.getLogger("boss")
@@ -185,12 +184,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     threading.excepthook = exit_on_thread_crash
     port = require_int_env("BOSS_PORT")
+    # An attempt running longer than this gets a second attempt elsewhere
+    # (design.md §5.1). docker-compose.yml sets it (30 s unless overridden).
+    task_timeout_seconds = require_int_env("TASK_TIMEOUT_SECONDS")
+    if task_timeout_seconds < 1:
+        sys.exit(f"TASK_TIMEOUT_SECONDS must be at least 1, got {task_timeout_seconds}")
 
     registry = WorkerRegistry(HEARTBEAT_TIMEOUT_SECONDS, clock=time.monotonic)
-    scheduler = Scheduler(TASK_TIMEOUT_SECONDS, clock=time.monotonic, events=JsonlEventLog())
+    scheduler = Scheduler(task_timeout_seconds, clock=time.monotonic, events=JsonlEventLog())
     server, _ = build_server(registry, scheduler, SHARED_ROOT, f"0.0.0.0:{port}")
     server.start()
-    log.info("boss listening on port %d (task timeout %.0fs)", port, TASK_TIMEOUT_SECONDS)
+    log.info("boss listening on port %d (task timeout %ds)", port, task_timeout_seconds)
 
     threading.Thread(
         target=check_liveness_forever, args=(registry, scheduler), name="liveness", daemon=True
