@@ -1,0 +1,2 @@
+# Extra dependency for drawing the evaluation plots (python -m eval.<experiment> plot).
+matplotlib==3.9.2
