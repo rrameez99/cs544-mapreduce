@@ -3,6 +3,7 @@
 import argparse
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, TextIO
@@ -16,6 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SHARED_ROOT = REPOSITORY_ROOT / "shared"
 DEFAULT_BOSS_ADDRESS = "localhost:5440"
 RPC_TIMEOUT_SECONDS = 10.0
+STATUS_POLL_INTERVAL_SECONDS = 1.0
 COPY_CHUNK_BYTES = 1024 * 1024
 
 
@@ -142,13 +144,7 @@ def get_job_status(stub: pb_grpc.BossStub, job_id: str) -> pb.JobStatus:
 
 def format_status(status: pb.JobStatus) -> str:
     """Render a concise, human-readable JobStatus."""
-    state_names = {
-        pb.JOB_STATE_MAPPING: "MAPPING",
-        pb.JOB_STATE_REDUCING: "REDUCING",
-        pb.JOB_STATE_SUCCEEDED: "SUCCEEDED",
-        pb.JOB_STATE_FAILED: "FAILED",
-    }
-    state = state_names.get(status.state, "UNSPECIFIED")
+    state = pb.JobState.Name(status.state).removeprefix("JOB_STATE_")
     summary = (
         f"{status.job_id}: {state} "
         f"maps {status.map_tasks_done}/{status.num_map_tasks}, "
@@ -157,6 +153,19 @@ def format_status(status: pb.JobStatus) -> str:
     if status.state == pb.JOB_STATE_FAILED and status.failure_reason:
         return f"{summary}\nreason: {status.failure_reason}"
     return summary
+
+
+def wait_for_job(
+    stub: pb_grpc.BossStub,
+    job_id: str,
+    sleep: Callable[[float], object] = time.sleep,
+) -> pb.JobStatus:
+    """Poll a job once per second until the boss reports a terminal state."""
+    while True:
+        status = get_job_status(stub, job_id)
+        if status.state in (pb.JOB_STATE_SUCCEEDED, pb.JOB_STATE_FAILED):
+            return status
+        sleep(STATUS_POLL_INTERVAL_SECONDS)
 
 
 def cat_output(path: str, shared_root: Path, write: Callable[[bytes], object]) -> None:
@@ -206,14 +215,6 @@ def _with_boss(address: str, call: Callable[[pb_grpc.BossStub], object]) -> obje
         channel.close()
 
 
-def _binary_writer(stdout: TextIO, binary_stdout: BinaryIO | None) -> Callable[[bytes], object]:
-    if binary_stdout is not None:
-        return binary_stdout.write
-    if hasattr(stdout, "buffer"):
-        return stdout.buffer.write
-    return lambda chunk: stdout.write(chunk.decode("utf-8"))
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Construct the four-command interface specified in design.md §4."""
     parser = argparse.ArgumentParser(prog="python -m client", description="MapReduce host client")
@@ -234,6 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = commands.add_parser("status", help="show one job-status snapshot")
     status_parser.add_argument("job_id")
+    status_parser.add_argument("--wait", action="store_true", help="poll until the job succeeds or fails")
 
     cat_parser = commands.add_parser("cat", help="write final reducer output parts to standard output")
     cat_parser.add_argument("path", help="shared output path such as /output/wc")
@@ -253,6 +255,7 @@ def main(
     """Run one client command. Dependency injection keeps command tests local and fast."""
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
+    binary_stdout = sys.stdout.buffer if binary_stdout is None else binary_stdout
     args = build_parser().parse_args(argv)
     try:
         if args.command == "upload":
@@ -271,10 +274,15 @@ def main(
             job_id = _with_boss(boss_address, lambda stub: submit_job(stub, spec))
             print(job_id, file=stdout)
         elif args.command == "status":
-            status = _with_boss(boss_address, lambda stub: get_job_status(stub, args.job_id))
+            if args.wait:
+                status = _with_boss(boss_address, lambda stub: wait_for_job(stub, args.job_id))
+            else:
+                status = _with_boss(boss_address, lambda stub: get_job_status(stub, args.job_id))
             print(format_status(status), file=stdout)
+            if args.wait and status.state == pb.JOB_STATE_FAILED:
+                return 1
         else:
-            cat_output(args.path, shared_root, _binary_writer(stdout, binary_stdout))
+            cat_output(args.path, shared_root, binary_stdout.write)
     except ClientError as error:
         print(f"error: {error}", file=stderr)
         return 1

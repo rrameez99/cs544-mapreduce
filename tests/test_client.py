@@ -14,6 +14,7 @@ from client.cli import (
     container_shared_path,
     host_shared_path,
     main,
+    wait_for_job,
 )
 from protos import mapreduce_pb2 as pb
 from protos import mapreduce_pb2_grpc as pb_grpc
@@ -23,12 +24,16 @@ class ClientBoss(pb_grpc.BossServicer):
     def __init__(self):
         self.submissions = []
         self.statuses = {}
+        self.status_sequences = {}
 
     def SubmitJob(self, request, _context):
         self.submissions.append(request)
         return pb.SubmitJobResponse(job_id="job-42")
 
     def GetJobStatus(self, request, context):
+        sequence = self.status_sequences.get(request.job_id)
+        if sequence:
+            return sequence.pop(0)
         status = self.statuses.get(request.job_id)
         if status is None:
             context.abort(grpc.StatusCode.NOT_FOUND, f"no job with ID {request.job_id!r}")
@@ -205,6 +210,38 @@ def test_status_turns_not_found_into_a_clear_client_error(shared_root, client_bo
     assert exit_code == 1
     assert stdout == ""
     assert "status failed (NOT_FOUND): no job with ID 'job-404'" in stderr
+
+
+def test_wait_for_job_polls_once_per_second_until_success(client_boss):
+    servicer, address = client_boss
+    servicer.status_sequences["job-9"] = [
+        pb.JobStatus(job_id="job-9", state=pb.JOB_STATE_MAPPING),
+        pb.JobStatus(job_id="job-9", state=pb.JOB_STATE_SUCCEEDED),
+    ]
+    channel = grpc.insecure_channel(address)
+    sleeps = []
+    try:
+        final_status = wait_for_job(pb_grpc.BossStub(channel), "job-9", sleep=sleeps.append)
+    finally:
+        channel.close()
+
+    assert final_status.state == pb.JOB_STATE_SUCCEEDED
+    assert sleeps == [1.0]
+
+
+def test_status_wait_prints_the_final_failure_and_returns_nonzero(shared_root, client_boss):
+    servicer, address = client_boss
+    servicer.statuses["job-10"] = pb.JobStatus(
+        job_id="job-10",
+        state=pb.JOB_STATE_FAILED,
+        failure_reason="map task 0 failed three times",
+    )
+
+    assert run_client(["status", "job-10", "--wait"], shared_root, address) == (
+        1,
+        "job-10: FAILED maps 0/0, reduces 0/0\nreason: map task 0 failed three times\n",
+        "",
+    )
 
 
 def test_cat_streams_only_final_parts_in_reducer_order(shared_root):
