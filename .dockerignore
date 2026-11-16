@@ -7,3 +7,7 @@ shared
 protos/*_pb2.py
 protos/*_pb2.pyi
 protos/*_pb2_grpc.py
+
+# Local pytest artifacts
+.pytest_cache/
+.pytest-*/

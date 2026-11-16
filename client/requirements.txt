@@ -1,0 +1,3 @@
+# Generates the ignored protobuf stubs on a clean host checkout and supplies
+# the grpcio/protobuf runtime used by ``python -m client``.
+grpcio-tools==1.85.1
