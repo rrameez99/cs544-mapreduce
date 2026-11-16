@@ -49,6 +49,17 @@ def job_seconds(events: list[dict]) -> float:
     return finished["t"]
 
 
+def map_output_bytes(events: list[dict]) -> int:
+    """Bytes in the accepted mapper outputs, excluding duplicate and stale attempts."""
+    return sum(
+        event["bytes_written"]
+        for event in events
+        if event["event"] == "attempt_finished"
+        and event["kind"] == "map"
+        and event["outcome"] == "accepted"
+    )
+
+
 AttemptKey = tuple[str, int, int]  # (kind, task_id, attempt_id)
 
 

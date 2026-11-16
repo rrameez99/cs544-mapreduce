@@ -1,7 +1,5 @@
 """Tests for the deterministic offline evaluation-data generator."""
 
-from pathlib import Path
-
 import pytest
 
 from scripts.make_data import DATASET_FILE_NAME, DatasetError, make_dataset, ordered_corpus
@@ -13,15 +11,15 @@ def test_make_dataset_sorts_sources_repeats_whole_utf8_corpus_and_keeps_lines(tm
     later.write_text("zebra\n", encoding="utf-8")
     first.write_text("ant 🐜", encoding="utf-8")  # Deliberately no final newline.
 
-    sources, corpus = ordered_corpus([later, first])
     output_directory = tmp_path / "books"
-    dataset_path = make_dataset([later, first], output_directory, len(corpus) + 1)
+    expected_corpus = first.read_bytes() + b"\n" + later.read_bytes()
+    sources, dataset_path = make_dataset([later, first], output_directory, len(expected_corpus) + 1)
 
     assert sources == [first.resolve(), later.resolve()]
     assert dataset_path == output_directory / DATASET_FILE_NAME
-    assert dataset_path.read_bytes() == corpus * 2
+    assert dataset_path.read_bytes() == expected_corpus * 2
     assert dataset_path.read_text(encoding="utf-8") == "ant 🐜\nzebra\nant 🐜\nzebra\n"
-    assert len(corpus) + 1 <= dataset_path.stat().st_size < len(corpus) * 2 + 1
+    assert len(expected_corpus) + 1 <= dataset_path.stat().st_size < len(expected_corpus) * 2 + 1
 
 
 def test_make_dataset_rejects_invalid_sources_and_existing_destination(tmp_path):

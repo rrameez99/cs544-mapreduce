@@ -7,6 +7,7 @@ never truncates a source file or a UTF-8 character.
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 
@@ -55,8 +56,8 @@ def ordered_corpus(source_paths: list[Path]) -> tuple[list[Path], bytes]:
     return sources, b"".join(_read_utf8_source(path) for path in sources)
 
 
-def make_dataset(source_paths: list[Path], output_directory: Path, target_bytes: int) -> Path:
-    """Write complete corpus repetitions and return the one generated data file.
+def make_dataset(source_paths: list[Path], output_directory: Path, target_bytes: int) -> tuple[list[Path], Path]:
+    """Write complete corpus repetitions and return the source order and data file.
 
     The requested size is a lower bound.  Keeping every repetition whole makes
     the result line-oriented and valid UTF-8; its size is less than one corpus
@@ -82,7 +83,7 @@ def make_dataset(source_paths: list[Path], output_directory: Path, target_bytes:
     # Keep this assertion next to the write loop: the documented size bound is
     # a property of whole-corpus repetitions, not an assumption about sources.
     assert target_bytes <= bytes_written < target_bytes + len(corpus)
-    return dataset_path
+    return sources, dataset_path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -108,10 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     """Create the requested dataset and print its reproducibility details."""
     args = build_parser().parse_args(argv)
     try:
-        sources, _corpus = ordered_corpus(args.sources)
-        dataset_path = make_dataset(sources, args.output, args.target_bytes)
+        sources, dataset_path = make_dataset(args.sources, args.output, args.target_bytes)
     except DatasetError as error:
-        print(f"error: {error}")
+        print(f"error: {error}", file=sys.stderr)
         return 1
 
     print("Sources:")
