@@ -159,7 +159,11 @@ The order matters: the rename makes the switch atomic, but only the `fsync` *bef
 The boss accepts the **first** completion report for each task and ignores later duplicates (it still records them, for the metrics in §8).
 
 ### 5.4 Backup tasks
-When a phase is nearly done (e.g., ≤ 10% of tasks still in progress), the boss launches one backup attempt for each remaining in-progress task on an idle worker. This is the same path as a timeout reassignment, just triggered earlier.
+Backup tasks are turned on per job (`JobSpec.use_backup_tasks`, the client's `--backup-tasks` flag), so the same cluster can run with and without them for comparison.
+
+Once every task in the current phase has started and at most 10% of them (at least one) are unfinished, an idle worker gets a backup attempt of a running task that has no backup yet, longest-running first. A backup never goes to the worker already running that task, and each task gets at most one. This is the same path as a timeout reassignment, just triggered earlier; the first attempt to finish wins, and the other is ignored as a duplicate (§5.3).
+
+**Straggler for the experiment:** `docker-compose.straggler.yml` gives `worker-4` 0.2 CPUs instead of 1, so it is a genuinely slow machine; no artificial delay is added to the code.
 
 **Out of scope:** boss failure. We assume a single boss, as the paper does.
 
@@ -177,7 +181,7 @@ When a phase is nearly done (e.g., ≤ 10% of tasks still in progress), the boss
 | Output commit | Two attempts of the same reduce task race to commit; the final file is complete and appears exactly once, and no `.tmp` files are left in the output | `pytest` |
 | Integration | `docker compose up`, run wordcount on the example data, compare with a single-process reference implementation | GitHub Actions (on PRs to `main`) |
 | Fault injection | Run a job, `docker compose kill worker-2` mid-job, check the output still matches the reference. Test both the map phase and the reduce phase | Script `tests/test_failures.py`, runs in CI |
-| Straggler injection | Slow one worker down (a config flag that adds a delay per record) and check the job finishes correctly, with backup tasks on and off | `tests/test_stragglers.py` |
+| Backup tasks | Scheduler unit tests: backups only near the end of a phase, never on the same worker, at most one per task, longest-running first, first finisher wins. On the VM: run with `docker-compose.straggler.yml`, with backup tasks on and off, and check the output is identical | `tests/test_scheduler.py`, eval runs |
 | Edge cases | `num_reduce = 1`, more maps than lines, empty input file, user code that raises an exception (the task should fail and be retried, without crashing the worker) | `pytest` |
 
 ## 8. Performance evaluation
@@ -218,7 +222,7 @@ Every PR is reviewed by the other person before it merges, and nobody pushes dir
 | `mapreduce.proto` + generated code | **Both** (pair on it) | — |
 | Boss: job/task state, split computation, scheduler | **Rameez** | Rohan |
 | Boss: task timeouts, heartbeats, re-execution (**feature 2**) | **Rameez** | Rohan |
-| Boss: backup tasks + straggler injection flag (**feature 3**) | **Rameez** | Rohan |
+| Boss: backup tasks + straggler Compose override (**feature 3**) | **Rameez** | Rohan |
 | Worker: attempt-scoped temp files + fsync/`os.replace` commit | **Rohan** | Rameez |
 | Worker: map/reduce runner, partitioner, user-code loading | **Rohan** | Rameez |
 | Worker: `FetchPartition` server + reducer fetch/retry | **Rohan** | Rameez |

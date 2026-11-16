@@ -14,6 +14,7 @@ disagree with the attempts:
 
 import itertools
 import logging
+import math
 import os
 import threading
 from dataclasses import dataclass, field
@@ -25,6 +26,9 @@ from protos import mapreduce_pb2 as pb
 
 # A task whose attempts keep failing (e.g. the user's map() raises) fails the job.
 MAX_FAILURES_PER_TASK = 3
+# Backup tasks (paper §3.6) start once at most this fraction of a phase's tasks
+# (and at least one) is unfinished, and every unfinished task is already running.
+BACKUP_PHASE_FRACTION = 0.1
 
 log = logging.getLogger("boss.jobs")
 
@@ -202,6 +206,7 @@ class Scheduler:
                 num_map_tasks=spec.num_map_tasks,
                 num_reduce_tasks=spec.num_reduce_tasks,
                 use_combiner=spec.use_combiner,
+                use_backup_tasks=spec.use_backup_tasks,
                 input_files=len(input_files),
                 input_bytes=total_bytes,
             )
@@ -230,20 +235,25 @@ class Scheduler:
         """Pick a task for an idle worker and start a new attempt of it, or return None if there is nothing to do.
 
         Jobs are served in submission order. Within a job, maps run before
-        reduces (a reduce needs every map's output). An IDLE task is preferred;
-        otherwise an IN_PROGRESS task whose newest attempt has run longer than
-        the task timeout gets another attempt on a different worker, and
-        whichever attempt finishes first wins.
+        reduces (a reduce needs every map's output). In order of preference:
+          1. an IDLE task
+          2. an IN_PROGRESS task whose newest attempt has run longer than the
+             task timeout (it may have crashed or be stuck)
+          3. if the job uses backup tasks and its current phase is nearly
+             done, a backup attempt of a task that has only one attempt
+        Extra attempts always go to a different worker, and whichever attempt
+        finishes first wins.
         """
         now = self._clock()
         with self._lock:
             for job in self._jobs.values():
                 if job.is_finished:
                     continue
-                candidates = job.map_tasks if job.state == pb.JOB_STATE_MAPPING else job.reduce_tasks
-                task = self._pick_task(candidates, worker_id, now)
-                if task is not None:
-                    return self._start_attempt(job, task, worker_id, fetch_address, now)
+                phase_tasks = job.map_tasks if job.state == pb.JOB_STATE_MAPPING else job.reduce_tasks
+                choice = self._pick_task(job, phase_tasks, worker_id, now)
+                if choice is not None:
+                    task, why = choice
+                    return self._start_attempt(job, task, why, worker_id, fetch_address, now)
             return None
 
     def report_task_done(self, worker_id: str, attempt: pb.TaskAttempt, metrics: pb.TaskMetrics) -> bool:
@@ -450,24 +460,42 @@ class Scheduler:
             return None
         return running
 
-    def _pick_task(self, tasks: list[Task], worker_id: str, now: float) -> Task | None:
-        for task in tasks:
+    def _pick_task(self, job: Job, phase_tasks: list[Task], worker_id: str, now: float) -> tuple[Task, str] | None:
+        """The task to start an attempt of, and why: "idle", "timeout" or "backup"."""
+        for task in phase_tasks:
             if task.state == TaskState.IDLE:
-                return task
-        for task in tasks:
-            if task.state != TaskState.IN_PROGRESS:
-                continue
-            if any(running.worker_id == worker_id for running in task.running_attempts.values()):
-                continue  # a second attempt on the same worker would not help
+                return task, "idle"
+
+        # Every unfinished task in this phase is running. A second attempt on
+        # a worker that is already running the task would not help.
+        running_elsewhere = [
+            task
+            for task in phase_tasks
+            if task.state == TaskState.IN_PROGRESS
+            and all(running.worker_id != worker_id for running in task.running_attempts.values())
+        ]
+        for task in running_elsewhere:
             newest_start = max(running.start_time for running in task.running_attempts.values())
             if now - newest_start > self._task_timeout_seconds:
-                return task
+                return task, "timeout"
+
+        if job.spec.use_backup_tasks:
+            unfinished = sum(task.state != TaskState.DONE for task in phase_tasks)
+            backup_threshold = max(1, math.ceil(BACKUP_PHASE_FRACTION * len(phase_tasks)))
+            if unfinished <= backup_threshold:
+                not_yet_backed_up = [task for task in running_elsewhere if len(task.running_attempts) == 1]
+                if not_yet_backed_up:
+                    # Back up the task that has been running longest: it is the likeliest straggler.
+                    oldest = min(
+                        not_yet_backed_up,
+                        key=lambda task: next(iter(task.running_attempts.values())).start_time,
+                    )
+                    return oldest, "backup"
         return None
 
     def _start_attempt(
-        self, job: Job, task: Task, worker_id: str, fetch_address: str, now: float
+        self, job: Job, task: Task, why: str, worker_id: str, fetch_address: str, now: float
     ) -> pb.MapTask | pb.ReduceTask:
-        is_retry = task.state == TaskState.IN_PROGRESS
         attempt_id = task.next_attempt_id
         task.next_attempt_id += 1
         map_attempt_ids = ()
@@ -476,17 +504,19 @@ class Scheduler:
         task.running_attempts[attempt_id] = Attempt(
             attempt_id, worker_id, fetch_address, start_time=now, map_attempt_ids=map_attempt_ids
         )
-        log.info(
-            "%s: assigning attempt %d of %s to %s%s",
-            job.job_id, attempt_id, task.name, worker_id,
-            " (earlier attempt timed out)" if is_retry else "",
-        )
-        if is_retry:
-            reason = "timeout"
-        elif attempt_id == 0:
-            reason = "first"
+        if why == "idle":
+            # A task is idle the first time, or again after a failure, a lost
+            # worker, or lost map output.
+            reason = "first" if attempt_id == 0 else "rerun"
         else:
-            reason = "rerun"  # after a failure, a lost worker, or lost map output
+            reason = why  # "timeout" or "backup"
+        explanation = {
+            "first": "",
+            "rerun": " (running it again)",
+            "timeout": " (earlier attempt timed out)",
+            "backup": " (backup task near the end of the phase)",
+        }[reason]
+        log.info("%s: assigning attempt %d of %s to %s%s", job.job_id, attempt_id, task.name, worker_id, explanation)
         self._record(job, "attempt_started", **self._attempt_fields(task, attempt_id, worker_id), reason=reason)
 
         attempt = pb.TaskAttempt(job_id=job.job_id, kind=task.kind, task_id=task.task_id, attempt_id=attempt_id)
