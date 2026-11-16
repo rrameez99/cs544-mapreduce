@@ -1,6 +1,5 @@
 """Map and reduce task execution independent of the worker gRPC process."""
 
-import itertools
 import json
 import logging
 import time
@@ -254,7 +253,7 @@ class TaskRunner:
         )
 
     def run_reduce(self, task: pb.ReduceTask) -> TaskRunResult:
-        """Fetch, sort, group, reduce, and atomically commit one reduce attempt."""
+        """Fetch, group, reduce in key order, and atomically commit one reduce attempt."""
         _validate_attempt(task.attempt, pb.TASK_KIND_REDUCE)
         started_at = time.monotonic()
         try:
@@ -264,7 +263,12 @@ class TaskRunner:
         except (StorageError, JobCodeError, OSError) as error:
             raise TaskExecutionError(f"{_attempt_label(task.attempt)} cannot start: {error}") from error
 
-        records: list[tuple[str, object]] = []
+        # Group values by key as partitions arrive, then sort only the distinct
+        # keys. Sorting every record instead (millions for a large job) is one
+        # long C call that holds the GIL for seconds, which stalls this worker's
+        # heartbeat thread until the boss declares it dead.
+        values_by_key: dict[str, list[object]] = {}
+        records_in = 0
         bytes_fetched = 0
         for location in task.map_outputs:
             try:
@@ -283,10 +287,11 @@ class TaskRunner:
                     location.map_task_id,
                     f"could not fetch map task {location.map_task_id} from {location.fetch_address}: {error}",
                 ) from error
-            records.extend(parsed_records)
+            for key, value in parsed_records:
+                values_by_key.setdefault(key, []).append(value)
+            records_in += len(parsed_records)
             bytes_fetched += fetched
 
-        records.sort(key=lambda record: record[0])
         try:
             temporary_path, final_path = reduce_output_paths(
                 task.output_path, task.attempt, self._shared_root
@@ -298,8 +303,8 @@ class TaskRunner:
         records_out = 0
         bytes_written = 0
         try:
-            for key, group in itertools.groupby(records, key=lambda record: record[0]):
-                values = (value for _, value in group)
+            for key in sorted(values_by_key):
+                values = iter(values_by_key[key])
                 for output_key, output_value in _user_outputs(functions.reduce, "reduce", key, values):
                     try:
                         output_text = str(output_value)
@@ -325,7 +330,7 @@ class TaskRunner:
 
         return TaskRunResult(
             metrics=pb.TaskMetrics(
-                records_in=len(records),
+                records_in=records_in,
                 records_out=records_out,
                 bytes_written=bytes_written,
                 bytes_fetched=bytes_fetched,
