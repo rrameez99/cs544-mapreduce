@@ -163,7 +163,8 @@ docker compose logs boss | tail     # "marking it dead", then re-runs
 The boss marks `worker-2` dead after 3 s without a heartbeat. Its running
 attempts go back to the queue, and so do its *finished* map tasks while any
 reduce still needs them, because their output was on `worker-2`'s disk (paper
-§3.3). A task that hangs instead of dying is re-run after a 30 s timeout. A
+§3.3). A task that hangs instead of dying is re-run after a 30 s timeout
+(`TASK_TIMEOUT_SECONDS` in `docker-compose.yml`). A
 reducer that can't fetch a partition reports it, and the boss re-runs that map
 task. `docker compose up -d worker-2` brings the worker back; it starts with an
 empty `/local` and registers again.
@@ -268,7 +269,7 @@ single-process run of the job. Medians of 3 runs on the 4-CPU VM:
 | Combiner | Intermediate data 425.5 MB → 21.9 MB (**19×** less); job 60.9 s → 14.1 s (**4.3×** faster) |
 | Worker killed during map | 60.4 s → 91.3 s; 2 map tasks re-run |
 | Worker killed during reduce | 60.4 s → 91.4 s; 4 map tasks and 2 reduce tasks re-run |
-| Straggler (`worker-4` at 0.2 CPU) | 60.3 s → 100.2 s; with backup tasks 96.5 s |
+| Straggler (`worker-4` at 0.2 CPU, 600 s task timeout) | 60.1 s → 142.5 s; with backup tasks **84.1 s** (41% faster) |
 
 ### 1. Scaling: job time vs. number of workers
 
@@ -346,21 +347,39 @@ round on 3 workers, which is the last 17 s of each timeline.
 ![Backup tasks](eval/plots/backup_tasks.png)
 
 Tasks completed over time with four healthy workers, with `worker-4` slowed to
-0.2 CPUs, and with the same straggler plus backup tasks.
+0.2 CPUs, and with the same straggler plus backup tasks. All three run with the
+task timeout raised to 600 s (`eval/backup.py`), so a timeout never re-runs the
+straggler's work and backup tasks are the only rescue, as in the paper's
+Figure 3.
 
-**Result:** the straggler made the job 66% slower (60.3 s → 100.2 s), and
-backup tasks only won back about 4 s (96.5 s). The event logs explain the small
-gain. Our 30 s task timeout (design.md §5.1) already acts as a late backup:
-without `--backup-tasks`, the reduce stuck on `worker-4` was re-run on a
-healthy worker when it timed out at 76 s, and that copy finished the job. With
-`--backup-tasks`, the backup of the same reduce started at 72 s, as soon as it
-was the last unfinished task, only about 4 s before the timeout would have
-fired. Both copies then needed about 24 s, because that reduce has the largest
-partition (127 MB). The straggler also slows the map phase (its one map took
-44 s instead of 8.5 s), and backups don't help there: its map finished just
-before the backup rule allowed a copy. Backup tasks pay off when a straggler
-holds a task much longer than the task timeout. With a 30 s timeout and tasks
-of 8–25 s, the timeout already caught most of the slowdown.
+**Result:** the straggler made the job 2.4× slower (60.1 s → 142.5 s), and
+backup tasks brought it back to 84.1 s, 41% faster, recovering about 70% of the
+time the straggler cost. Without backups, the tail is one reduce stuck on
+`worker-4` for 96 s while the other three workers sit idle from about 70 s on
+(the flat orange line). The event logs show backups rescuing the job in two
+different ways:
+
+- In run 2, the straggler held a reduce. Once it was the last unfinished task,
+  a backup copy started on a healthy worker at 70 s and finished at 87.5 s; the
+  straggler's own copy would have needed about 96 s, as in the runs without
+  backups.
+- In runs 1 and 3, `worker-4` was idle near the end of the map phase, so it was
+  given a backup copy of a map itself. Our rule only keeps a backup off the
+  worker running the original, and losing attempts aren't cancelled, so
+  `worker-4` stayed busy with that useless copy and never took a reduce. The
+  healthy workers ran all four reduces.
+
+Both are worth knowing about: a slow worker can be handed backups, and losing
+attempts keep using a worker until they finish. Placing backups only on fast
+workers (as the LATE scheduler does) and cancelling attempts once their task is
+done would be the next improvements.
+
+**With the default 30 s timeout** (this experiment's first run, in the history
+of this PR), the timeout alone already re-ran the stuck reduce. The straggler
+then cost only 100.2 s instead of 142.5 s, and backups improved that to just
+96.5 s, because the backup started only about 4 s before the timeout would have
+fired. The timeout and backup tasks catch the same problem; backups catch it as
+soon as a phase is nearly done instead of waiting a fixed 30 s.
 
 ### What testing at scale found
 
