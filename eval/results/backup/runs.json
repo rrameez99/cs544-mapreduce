@@ -5,8 +5,10 @@
     "run": 1,
     "job_id": "job-1",
     "event_log": "normal-run1.jsonl",
-    "job_seconds": 60.261,
-    "notes": {}
+    "job_seconds": 60.356,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -14,8 +16,10 @@
     "run": 2,
     "job_id": "job-1",
     "event_log": "normal-run2.jsonl",
-    "job_seconds": 60.705,
-    "notes": {}
+    "job_seconds": 59.994,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -23,8 +27,10 @@
     "run": 3,
     "job_id": "job-1",
     "event_log": "normal-run3.jsonl",
-    "job_seconds": 60.211,
-    "notes": {}
+    "job_seconds": 60.072,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -32,8 +38,10 @@
     "run": 1,
     "job_id": "job-1",
     "event_log": "straggler-run1.jsonl",
-    "job_seconds": 100.185,
-    "notes": {}
+    "job_seconds": 141.822,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -41,8 +49,10 @@
     "run": 2,
     "job_id": "job-1",
     "event_log": "straggler-run2.jsonl",
-    "job_seconds": 95.594,
-    "notes": {}
+    "job_seconds": 142.947,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -50,8 +60,10 @@
     "run": 3,
     "job_id": "job-1",
     "event_log": "straggler-run3.jsonl",
-    "job_seconds": 100.286,
-    "notes": {}
+    "job_seconds": 142.546,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -59,8 +71,10 @@
     "run": 1,
     "job_id": "job-1",
     "event_log": "straggler---backups-run1.jsonl",
-    "job_seconds": 96.451,
-    "notes": {}
+    "job_seconds": 84.107,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -68,8 +82,10 @@
     "run": 2,
     "job_id": "job-1",
     "event_log": "straggler---backups-run2.jsonl",
-    "job_seconds": 89.4,
-    "notes": {}
+    "job_seconds": 87.538,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   },
   {
     "experiment": "backup",
@@ -77,7 +93,9 @@
     "run": 3,
     "job_id": "job-1",
     "event_log": "straggler---backups-run3.jsonl",
-    "job_seconds": 96.516,
-    "notes": {}
+    "job_seconds": 83.202,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
   }
 ]
