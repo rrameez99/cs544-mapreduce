@@ -1,0 +1,56 @@
+[
+  {
+    "experiment": "combiner",
+    "label": "combiner off",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "combiner-off-run1.jsonl",
+    "job_seconds": 60.146,
+    "notes": {}
+  },
+  {
+    "experiment": "combiner",
+    "label": "combiner off",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "combiner-off-run2.jsonl",
+    "job_seconds": 61.143,
+    "notes": {}
+  },
+  {
+    "experiment": "combiner",
+    "label": "combiner off",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "combiner-off-run3.jsonl",
+    "job_seconds": 60.949,
+    "notes": {}
+  },
+  {
+    "experiment": "combiner",
+    "label": "combiner on",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "combiner-on-run1.jsonl",
+    "job_seconds": 14.141,
+    "notes": {}
+  },
+  {
+    "experiment": "combiner",
+    "label": "combiner on",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "combiner-on-run2.jsonl",
+    "job_seconds": 13.637,
+    "notes": {}
+  },
+  {
+    "experiment": "combiner",
+    "label": "combiner on",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "combiner-on-run3.jsonl",
+    "job_seconds": 14.363,
+    "notes": {}
+  }
+]

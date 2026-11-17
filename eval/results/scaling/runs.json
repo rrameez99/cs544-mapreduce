@@ -1,0 +1,110 @@
+[
+  {
+    "experiment": "scaling",
+    "label": "1 worker",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "1-worker-run1.jsonl",
+    "job_seconds": 224.29,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "1 worker",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "1-worker-run2.jsonl",
+    "job_seconds": 224.549,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "1 worker",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "1-worker-run3.jsonl",
+    "job_seconds": 220.062,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "2 workers",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "2-workers-run1.jsonl",
+    "job_seconds": 116.509,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "2 workers",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "2-workers-run2.jsonl",
+    "job_seconds": 116.888,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "2 workers",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "2-workers-run3.jsonl",
+    "job_seconds": 116.1,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "3 workers",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "3-workers-run1.jsonl",
+    "job_seconds": 92.575,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "3 workers",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "3-workers-run2.jsonl",
+    "job_seconds": 92.346,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "3 workers",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "3-workers-run3.jsonl",
+    "job_seconds": 90.821,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "4 workers",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "4-workers-run1.jsonl",
+    "job_seconds": 60.048,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "4 workers",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "4-workers-run2.jsonl",
+    "job_seconds": 59.965,
+    "notes": {}
+  },
+  {
+    "experiment": "scaling",
+    "label": "4 workers",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "4-workers-run3.jsonl",
+    "job_seconds": 60.099,
+    "notes": {}
+  }
+]

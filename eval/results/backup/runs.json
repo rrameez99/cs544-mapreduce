@@ -1,0 +1,101 @@
+[
+  {
+    "experiment": "backup",
+    "label": "normal",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "normal-run1.jsonl",
+    "job_seconds": 60.356,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "normal",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "normal-run2.jsonl",
+    "job_seconds": 59.994,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "normal",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "normal-run3.jsonl",
+    "job_seconds": 60.072,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "straggler-run1.jsonl",
+    "job_seconds": 141.822,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "straggler-run2.jsonl",
+    "job_seconds": 142.947,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "straggler-run3.jsonl",
+    "job_seconds": 142.546,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler + backups",
+    "run": 1,
+    "job_id": "job-1",
+    "event_log": "straggler---backups-run1.jsonl",
+    "job_seconds": 84.107,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler + backups",
+    "run": 2,
+    "job_id": "job-1",
+    "event_log": "straggler---backups-run2.jsonl",
+    "job_seconds": 87.538,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  },
+  {
+    "experiment": "backup",
+    "label": "straggler + backups",
+    "run": 3,
+    "job_id": "job-1",
+    "event_log": "straggler---backups-run3.jsonl",
+    "job_seconds": 83.202,
+    "notes": {
+      "task_timeout_seconds": 600
+    }
+  }
+]

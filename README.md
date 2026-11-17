@@ -163,7 +163,8 @@ docker compose logs boss | tail     # "marking it dead", then re-runs
 The boss marks `worker-2` dead after 3 s without a heartbeat. Its running
 attempts go back to the queue, and so do its *finished* map tasks while any
 reduce still needs them, because their output was on `worker-2`'s disk (paper
-§3.3). A task that hangs instead of dying is re-run after a 30 s timeout. A
+§3.3). A task that hangs instead of dying is re-run after a 30 s timeout
+(`TASK_TIMEOUT_SECONDS` in `docker-compose.yml`). A
 reducer that can't fetch a partition reports it, and the boss re-runs that map
 task. `docker compose up -d worker-2` brings the worker back; it starts with an
 empty `/local` and registers again.
@@ -257,6 +258,19 @@ python -m eval.failures plot
 python -m eval.backup plot
 ```
 
+### Summary
+
+All 36 runs (12 configurations × 3) produced output identical to a
+single-process run of the job. Medians of 3 runs on the 4-CPU VM:
+
+| Experiment | Result |
+|---|---|
+| Scaling | 224.3 s with 1 worker → 60.0 s with 4 workers: **3.7× faster** |
+| Combiner | Intermediate data 425.5 MB → 21.9 MB (**19×** less); job 60.9 s → 14.1 s (**4.3×** faster) |
+| Worker killed during map | 60.4 s → 91.3 s; 2 map tasks re-run |
+| Worker killed during reduce | 60.4 s → 91.4 s; 4 map tasks and 2 reduce tasks re-run |
+| Straggler (`worker-4` at 0.2 CPU, 600 s task timeout) | 60.1 s → 142.5 s; with backup tasks **84.1 s** (41% faster) |
+
 ### 1. Scaling: job time vs. number of workers
 
 ![Scaling](eval/plots/scaling.png)
@@ -264,6 +278,14 @@ python -m eval.backup plot
 The same job (16 maps, 4 reduces) with 1 to 4 workers, against ideal linear
 speedup. Each worker is limited to 1 CPU, so speedup comes only from spreading
 tasks across workers.
+
+**Result:** 224.3 s → 116.5 s → 92.3 s → 60.0 s, so 4 workers are 3.7× faster
+than 1, close to the ideal 4×. Runs were very repeatable (min–max within 2.5%).
+3 workers fall furthest below the ideal line because the work doesn't divide
+evenly: 16 maps take 6 rounds instead of 5⅓, and the 4 reduces take 2 rounds,
+with only one worker busy in the second. At 4 workers (60.0 s vs. an ideal
+56.1 s), the gap is mostly partition skew: crc32 sends 127 MB to reduce task 2
+and 94–104 MB to the others, so that reducer finishes about 5 s after the rest.
 
 ### 2. Combiner
 
@@ -279,6 +301,13 @@ The raw event log for every run and its metadata are stored in
 `eval/results/combiner/`. The plot can therefore be regenerated and inspected
 without rerunning the cluster.
 
+**Result:** the combiner cut map output from 36.4 million records (425.5 MB)
+to 1.36 million (21.9 MB), 19× less data to write, fetch and sort. The job got
+4.3× faster (60.9 s → 14.1 s), and not only in the shuffle: maps finished at
+about 12 s instead of 36 s, because writing one JSON line per word was most of
+a map task's work. Word count is the best case for a combiner, since English
+text repeats the same words constantly.
+
 ### 3. Failure timeline
 
 ![Failure timeline](eval/plots/failures_timeline.png)
@@ -290,6 +319,15 @@ on its disk; the other workers re-run them. The harness only kills `worker-2`
 while it is running a task of that phase, and checks the event log afterwards
 to confirm that work was actually lost.
 
+**Killed during map** (top, killed at 9.7 s): the boss noticed the missing
+heartbeats 3.4 s later, then re-ran both the map `worker-2` was running and the
+one it had already finished, since that output was on its disk. **Killed during
+reduce** (bottom, killed at 36.4 s): a reducer detected the failure first, with
+its `FetchPartition` call to `worker-2` failing immediately, before the
+heartbeat timeout. All four maps whose output lived on `worker-2` were re-run,
+and the reduces restarted once that output existed again (paper §3.3). In every
+run the output still matched the single-process count.
+
 ### 4. Cost of a failure
 
 ![Failure cost](eval/plots/failures_cost.png)
@@ -297,12 +335,65 @@ to confirm that work was actually lost.
 Job time with no failure, a worker killed during map, and a worker killed
 during reduce, with how many tasks had to be re-run.
 
+**Result:** both kinds of failure cost about 31 s (60.4 s → 91.3 s and 91.4 s),
+even though the reduce-phase kill caused three times as many re-runs. The
+timelines show why: the re-runs themselves are short. Most of the cost is
+finishing the job with three workers instead of four. In both cases the last
+map finishes at about 54 s instead of 36 s, and the 4 reduces need a second
+round on 3 workers, which is the last 17 s of each timeline.
+
 ### 5. Backup tasks (like Figure 3 of the paper)
 
 ![Backup tasks](eval/plots/backup_tasks.png)
 
 Tasks completed over time with four healthy workers, with `worker-4` slowed to
-0.2 CPUs, and with the same straggler plus backup tasks.
+0.2 CPUs, and with the same straggler plus backup tasks. All three run with the
+task timeout raised to 600 s (`eval/backup.py`), so a timeout never re-runs the
+straggler's work and backup tasks are the only rescue, as in the paper's
+Figure 3.
+
+**Result:** the straggler made the job 2.4× slower (60.1 s → 142.5 s), and
+backup tasks brought it back to 84.1 s, 41% faster, recovering about 70% of the
+time the straggler cost. Without backups, the tail is one reduce stuck on
+`worker-4` for 96 s while the other three workers sit idle from about 70 s on
+(the flat orange line). The event logs show backups rescuing the job in two
+different ways:
+
+- In run 2, the straggler held a reduce. Once it was the last unfinished task,
+  a backup copy started on a healthy worker at 70 s and finished at 87.5 s; the
+  straggler's own copy would have needed about 96 s, as in the runs without
+  backups.
+- In runs 1 and 3, `worker-4` was idle near the end of the map phase, so it was
+  given a backup copy of a map itself. Our rule only keeps a backup off the
+  worker running the original, and losing attempts aren't cancelled, so
+  `worker-4` stayed busy with that useless copy and never took a reduce. The
+  healthy workers ran all four reduces.
+
+Both are worth knowing about: a slow worker can be handed backups, and losing
+attempts keep using a worker until they finish. Placing backups only on fast
+workers (as the LATE scheduler does) and cancelling attempts once their task is
+done would be the next improvements.
+
+**With the default 30 s timeout** (this experiment's first run, in the history
+of this PR), the timeout alone already re-ran the stuck reduce. The straggler
+then cost only 100.2 s instead of 142.5 s, and backups improved that to just
+96.5 s, because the backup started only about 4 s before the timeout would have
+fired. The timeout and backup tasks catch the same problem; backups catch it as
+soon as a phase is nearly done instead of waiting a fixed 30 s.
+
+### What testing at scale found
+
+Running the 200 MiB dataset exposed a bug that the unit tests and smaller
+inputs never hit. Each reducer sorted all of its ~9 million records with
+`list.sort()`, a single C call that holds Python's GIL for about 5 s. The
+worker's heartbeat thread couldn't run during the sort, so the boss (3 s
+timeout) declared healthy workers dead and re-ran their map tasks. The reduce
+then moved to another worker, which froze the same way, and the job never
+finished. The reducer now groups values by key in a dict and sorts only the
+distinct keys, so the same job finishes in 60 s with no false failures.
+`test_reduce_never_holds_the_gil_long_enough_to_stall_heartbeats` reproduces
+the stall. A sturdier fix would run tasks in a separate process, so no task can
+ever block heartbeats; we left that as future work.
 
 ## Repository layout
 
